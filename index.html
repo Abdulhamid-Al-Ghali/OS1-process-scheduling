@@ -116,7 +116,7 @@
       <table id="ptable">
         <thead>
           <tr id="phead">
-            <th>PID</th><th>Arrival (AT)</th><th>Burst(s)</th>
+            <th>PID</th><th>Arrival (AT)</th><th>Burst (BT)</th>
             <th class="col-priority hide">Priority</th><th>I/O Time</th>
             <th></th>
           </tr>
@@ -124,7 +124,7 @@
         <tbody id="pbody"></tbody>
       </table>
     </div>
-    <p class="hint">Burst(s): a single number (e.g. <code>5</code>) is one CPU burst — you can optionally add one I/O value in the I/O column. For multiple CPU/I/O bursts, type a sequence like <code>5, I3, 4, I2, 6</code> (I = I/O). Sequences must start and end with a CPU burst; the I/O column is ignored when a sequence is used. Prefer separate boxes? Set <strong>Burst input mode</strong> above to <strong>Multiple CPU &amp; I/O bursts</strong> and choose how many BT and I/O columns you need — the table rebuilds automatically (BT1, IO1, BT2, IO2, BT3…).</p>
+    <p class="hint">Simple mode: each process has ONE CPU burst (BT) and an optional single I/O value. For processes with multiple CPU/I/O bursts, set <strong>Burst input mode</strong> above to <strong>Multiple CPU &amp; I/O bursts</strong> and choose how many BT and I/O columns you need — the table rebuilds automatically (BT1, IO1, BT2, IO2, BT3…)</p>
     <div class="btn-row">
       <button class="btn ghost" id="btn-add">+ Add process</button>
       <button class="btn ghost" id="btn-sample">Load sample data</button>

@@ -549,7 +549,7 @@ if (typeof document !== 'undefined') (function UI() {
       h += '<th class="col-priority">Priority</th><th></th>';
       phead.innerHTML = h;
     } else {
-      phead.innerHTML = '<th>PID</th><th>Arrival (AT)</th><th>Burst(s)</th>' +
+      phead.innerHTML = '<th>PID</th><th>Arrival (AT)</th><th>Burst (BT)</th>' +
         '<th class="col-priority">Priority</th><th>I/O Time</th><th></th>';
     }
     phead.querySelector('.col-priority').classList.toggle('hide', !isPriority(algoSel.value));
@@ -570,7 +570,7 @@ if (typeof document !== 'undefined') (function UI() {
       html += '<td class="col-priority"><input class="f-pr" type="number" value="' + esc(vals.priority != null ? vals.priority : '') + '"></td>' +
         '<td><button class="btn ghost danger btn-remove">Remove</button></td>';
     } else {
-      html += '<td><input class="f-bt" placeholder="5   or   5, I3, 4" value="' + esc(vals.bt != null ? vals.bt : '') + '"></td>' +
+      html += '<td><input class="f-bt" type="number" min="1" placeholder="5" value="' + esc(vals.bt != null ? vals.bt : '') + '"></td>' +
         '<td class="col-priority"><input class="f-pr" type="number" value="' + esc(vals.priority != null ? vals.priority : '') + '"></td>' +
         '<td><input class="f-io" type="number" min="0" value="' + esc(vals.io != null ? vals.io : 0) + '"></td>' +
         '<td><button class="btn ghost danger btn-remove">Remove</button></td>';
@@ -678,9 +678,10 @@ if (typeof document !== 'undefined') (function UI() {
       } else {
         const btText = tr.querySelector('.f-bt').value.trim();
         const ioText = tr.querySelector('.f-io').value.trim();
-        if (!btText) throw new Error(pid + ': Burst is required \u2014 a number like "5" or a sequence like "5, I3, 4".');
-        try { seq = Engine.parseBurstSequence(btText); }
-        catch (e) { throw new Error(pid + ': ' + e.message); }
+        if (btText === '') throw new Error(pid + ': Burst Time (BT) is required.');
+        const b = +btText;
+        if (isNaN(b) || b <= 0) throw new Error(pid + ': BT must be a single number > 0. For multiple bursts, set Burst input mode to "Multiple CPU & I/O bursts".');
+        seq = [{ type: 'cpu', len: b }];
         if (ioText !== '' && (isNaN(+ioText) || +ioText < 0)) throw new Error(pid + ': I/O Time must be a number \u2265 0.');
         io = ioText === '' ? 0 : +ioText;
       }
@@ -860,10 +861,12 @@ if (typeof document !== 'undefined') (function UI() {
   if (location.hash === '#demo') { show('solver'); loadSample(); $('btn-calc').click(); }
   else if (location.hash === '#demo-mlfq') {
     show('solver'); algoSel.value = 'mlfq'; updateQuantumVisibility();
+    $('burst-mode').value = 'multi'; $('n-bt').value = 2; $('n-io').value = 1;
+    updateBurstModeVisibility();
     pbody.innerHTML = '';
-    addRow({ pid: 'P1', at: 0, bt: '10', io: 0 });
-    addRow({ pid: 'P2', at: 0, bt: '4', io: 0 });
-    addRow({ pid: 'P3', at: 1, bt: '2, I5, 3', io: 0 });
+    addRow({ pid: 'P1', at: 0, bts: [10], ios: [] });
+    addRow({ pid: 'P2', at: 0, bts: [4], ios: [] });
+    addRow({ pid: 'P3', at: 1, bts: [2, 3], ios: [5] });
     $('btn-calc').click();
   }
   else if (location.hash === '#demo-multi') {
