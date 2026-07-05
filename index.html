@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>OS-1 Process Scheduling Solver</title>
-<meta name="description" content="Solve and practice OS-1 CPU scheduling questions: FCFS, SJF, SRTF, Round Robin, Priority and Multi-Level Queue with Gantt charts and full calculations.">
+<meta name="description" content="Solve and practice OS-1 CPU scheduling questions: FCFS, SJF, SRTF, Round Robin, Priority and MLFQ (Multi-Level Feedback Queue) with Gantt charts and full calculations.">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -48,7 +48,7 @@
     <div class="chips">
       <span class="chip">FCFS</span><span class="chip">SJF</span><span class="chip">SRTF</span>
       <span class="chip">Round Robin</span><span class="chip">Priority (Non-Preemptive)</span>
-      <span class="chip">Priority (Preemptive)</span><span class="chip">Multi-Level Queue</span>
+      <span class="chip">Priority (Preemptive)</span><span class="chip">MLFQ (Feedback Queue)</span>
     </div>
   </div>
 </section>
@@ -68,7 +68,7 @@
           <option value="rr">RR — Round Robin (preemptive)</option>
           <option value="priority-np">Priority — Non-Preemptive</option>
           <option value="priority-p">Priority — Preemptive</option>
-          <option value="mlq">Multi-Level Queue</option>
+          <option value="mlfq">MLFQ — Multi-Level Feedback Queue</option>
         </select>
       </label>
       <label id="opt-qt" hidden>Quantum Time (QT)
@@ -85,14 +85,14 @@
       </label>
     </div>
 
-    <div id="mlq-config" hidden>
+    <div id="mlfq-config" hidden>
       <div class="options-grid" style="margin-top:14px">
         <label>Number of queue levels
-          <input type="number" id="mlq-levels" min="2" max="4" value="2">
+          <input type="number" id="mlfq-levels" min="2" max="4" value="3">
         </label>
       </div>
-      <div id="mlq-rows"></div>
-      <p class="hint">Queue 1 has the highest priority: an arrived process in a higher queue preempts lower queues. FCFS / SJF run non-preemptively inside their queue; SRTF and Priority re-evaluate every time unit; RR uses its own quantum. Assign each process a queue number in the table below.</p>
+      <div id="mlfq-rows"></div>
+      <p class="hint">MLFQ rules: every process enters Queue 1 (highest priority) when it arrives. Processes in the same queue run Round Robin with that queue’s quantum. A process that uses its FULL quantum and still needs CPU is demoted one queue down; a process that gives up the CPU before its quantum ends (finishes a burst or goes to I/O) STAYS at its level. While a higher queue has a ready process, lower queues never run — higher queues preempt lower ones.</p>
     </div>
   </div>
 
@@ -102,14 +102,15 @@
       <table id="ptable">
         <thead>
           <tr>
-            <th>PID</th><th>Arrival (AT)</th><th>Burst (BT)</th>
+            <th>PID</th><th>Arrival (AT)</th><th>Burst(s)</th>
             <th class="col-priority hide">Priority</th><th>I/O Time</th>
-            <th class="col-queue hide">Queue</th><th></th>
+            <th></th>
           </tr>
         </thead>
         <tbody id="pbody"></tbody>
       </table>
     </div>
+    <p class="hint">Burst(s): a single number (e.g. <code>5</code>) is one CPU burst — you can optionally add one I/O value in the I/O column. For multiple CPU/I/O bursts, type a sequence like <code>5, I3, 4, I2, 6</code> (I = I/O). Sequences must start and end with a CPU burst; the I/O column is ignored when a sequence is used.</p>
     <div class="btn-row">
       <button class="btn ghost" id="btn-add">+ Add process</button>
       <button class="btn ghost" id="btn-sample">Load sample data</button>
@@ -138,7 +139,7 @@
           <option value="rr">Round Robin</option>
           <option value="priority-np">Priority (Non-Preemptive)</option>
           <option value="priority-p">Priority (Preemptive)</option>
-          <option value="mlq">Multi-Level Queue</option>
+          <option value="mlfq">MLFQ (Feedback Queue)</option>
         </select>
       </label>
       <label>Number of processes
@@ -156,6 +157,9 @@
       <label>Include I/O time?
         <select id="g-io"><option value="no">No</option><option value="yes">Yes</option></select>
       </label>
+      <label>Allow multiple CPU/I/O bursts?
+        <select id="g-multi"><option value="no">No</option><option value="yes">Yes</option></select>
+      </label>
       <label>Priority rule (for priority questions)
         <select id="g-rule">
           <option value="random">Website chooses randomly</option>
@@ -163,7 +167,7 @@
           <option value="high">Highest number = higher priority</option>
         </select>
       </label>
-      <label>Quantum time (for RR questions)
+      <label id="g-qtmode-wrap">Quantum time (for RR / MLFQ)
         <select id="g-qtmode">
           <option value="random">Website chooses randomly</option>
           <option value="fixed">I choose the quantum</option>
@@ -211,9 +215,9 @@
     <div class="table-wrap">
       <table class="formula-table">
         <tbody>
-          <tr><td>CT</td><td>Completion Time — when the process finishes its full burst</td><td><code>read from Gantt chart</code></td></tr>
+          <tr><td>CT</td><td>Completion Time — when the process finishes its FINAL CPU burst</td><td><code>read from Gantt chart</code></td></tr>
           <tr><td>TAT</td><td>Turnaround Time</td><td><code>TAT = CT − AT</code></td></tr>
-          <tr><td>WT</td><td>Waiting Time</td><td><code>WT = TAT − (BT + I/O Time)</code></td></tr>
+          <tr><td>WT</td><td>Waiting Time</td><td><code>WT = TAT − (Total BT + Total I/O)</code></td></tr>
           <tr><td>RT</td><td>Response Time (first CPU allocation)</td><td><code>RT = First Start − AT</code></td></tr>
         </tbody>
       </table>
@@ -245,7 +249,7 @@
           <tr><td>SRTF</td><td>Shortest remaining time — preemptive SJF</td><td><code>criteria: remaining BT</code></td></tr>
           <tr><td>RR</td><td>Ready queue with time slices — preemptive</td><td><code>criteria: AT + QT</code></td></tr>
           <tr><td>Priority</td><td>Best priority wins (highest or lowest rule)</td><td><code>NP and P versions</code></td></tr>
-          <tr><td>MLQ</td><td>Multiple queues, each with its own algorithm</td><td><code>queue 1 = top priority</code></td></tr>
+          <tr><td>MLFQ</td><td>Feedback queues: arrivals enter the top queue; using a FULL quantum demotes one level; giving up the CPU early keeps the level</td><td><code>higher queue always wins</code></td></tr>
         </tbody>
       </table>
     </div>

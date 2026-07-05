@@ -1,31 +1,83 @@
 'use strict';
 
 /* =====================================================================
-   OS Process Scheduling Solver
-   Engine  : pure scheduling algorithms (testable without a browser)
+   OS-1 Process Scheduling Solver
+   Engine   : pure scheduling algorithms (testable without a browser)
    Generator: random exam-style question builder
-   UI      : DOM wiring (runs only in the browser)
+   UI       : DOM wiring (runs only in the browser)
+
+   Multi-burst support:
+   A process may have a burst sequence like "5, I3, 4, I2, 6"
+   = CPU 5 -> I/O 3 -> CPU 4 -> I/O 2 -> CPU 6.
+   While a process is doing I/O it is blocked (never shown on the CPU);
+   it rejoins the ready queue when its I/O finishes.
+   CT = the time when the FINAL CPU burst finishes.
    ===================================================================== */
 
 /* ============================ ENGINE ============================ */
 const Engine = (() => {
 
-  // Default tie-breaker: earlier Arrival Time, then smaller input order (PID order)
+  // Default tie-breaker: earlier Arrival Time, then smaller input (PID) order
   const TIE = (a, b) => a.at - b.at || a.idx - b.idx;
+  const LIMIT = 200000; // simulation safety cap
+
+  /* parseBurstSequence("5, I3, 4") ->
+     [{type:'cpu',len:5},{type:'io',len:3},{type:'cpu',len:4}]
+     Rules: starts with CPU, ends with CPU, CPU > 0, I/O >= 0, alternating. */
+  function parseBurstSequence(text) {
+    const parts = String(text).split(',').map(s => s.trim()).filter(s => s !== '');
+    if (!parts.length) throw new Error('Burst sequence is empty.');
+    const seq = [];
+    for (const raw of parts) {
+      const isIO = /^i/i.test(raw);
+      const numStr = isIO ? raw.replace(/^i\s*\/?\s*o?\s*/i, '') : raw;
+      const val = Number(numStr);
+      if (numStr === '' || !isFinite(val)) throw new Error('Invalid burst entry "' + raw + '".');
+      if (isIO) {
+        if (val < 0) throw new Error('I/O bursts must be \u2265 0 ("' + raw + '").');
+        seq.push({ type: 'io', len: val });
+      } else {
+        if (val <= 0) throw new Error('CPU bursts must be > 0 ("' + raw + '").');
+        seq.push({ type: 'cpu', len: val });
+      }
+    }
+    if (seq[0].type !== 'cpu') throw new Error('A burst sequence must start with a CPU burst.');
+    if (seq[seq.length - 1].type !== 'cpu') throw new Error('A burst sequence must end with a CPU burst.');
+    for (let i = 1; i < seq.length; i++)
+      if (seq[i].type === seq[i - 1].type)
+        throw new Error('CPU and I/O bursts must alternate in the sequence.');
+    return seq;
+  }
+
+  const calculateTotalBT = seq => seq.filter(b => b.type === 'cpu').reduce((s, b) => s + b.len, 0);
+  const calculateTotalIO = seq => seq.filter(b => b.type === 'io').reduce((s, b) => s + b.len, 0);
+  const seqText = seq => seq.map(b => (b.type === 'io' ? 'I' + b.len : String(b.len))).join(', ');
 
   function prep(procs) {
-    return procs.map((p, i) => ({
-      pid: String(p.pid),
-      at: +p.at,
-      bt: +p.bt,
-      priority: (p.priority === '' || p.priority == null) ? null : +p.priority,
-      io: (p.io === '' || p.io == null) ? 0 : +p.io,
-      queue: (p.queue === '' || p.queue == null) ? 1 : +p.queue,
-      idx: i,
-      remaining: +p.bt,
-      firstStart: null,
-      ct: null
-    }));
+    return procs.map((p, i) => {
+      let seq;
+      if (p.bursts) seq = (typeof p.bursts === 'string') ? parseBurstSequence(p.bursts) : p.bursts;
+      else seq = [{ type: 'cpu', len: +p.bt }];
+      // Simple mode keeps the old behaviour: a single BT plus one optional I/O
+      // value that only enters the WT formula (WT = TAT - (BT + I/O)).
+      const simpleIO = (seq.length === 1 && p.io != null && p.io !== '') ? +p.io : 0;
+      return {
+        pid: String(p.pid),
+        at: +p.at,
+        priority: (p.priority === '' || p.priority == null) ? null : +p.priority,
+        idx: i,
+        seq,
+        multi: seq.length > 1,
+        totalBT: calculateTotalBT(seq),
+        totalIO: calculateTotalIO(seq) + simpleIO,
+        burstIdx: 0,               // index of the CURRENT cpu burst inside seq
+        remaining: seq[0].len,     // remaining units of the current cpu burst
+        readyAt: +p.at,            // when the process is (or becomes) ready
+        blockedUntil: null,        // set while the process is doing I/O
+        firstStart: null, ct: null,
+        level: 1, qUsed: 0         // used by RR / MLFQ
+      };
+    });
   }
 
   // Add a segment to the timeline, merging contiguous segments of the same pid
@@ -35,17 +87,41 @@ const Engine = (() => {
     tl.push({ pid, start, end });
   }
 
-  // Compute per-process stats + overall summary
+  /* handleIOBlocking(p, t): the current CPU burst just completed at time t.
+     -> 'io'    the process leaves for I/O (blocked until blockedUntil)
+     -> 'ready' zero-length I/O, straight back to ready
+     -> 'done'  no bursts left, CT = t                                        */
+  function handleIOBlocking(p, t, log, note) {
+    p.qUsed = 0;
+    if (p.burstIdx + 2 < p.seq.length || (p.burstIdx + 1 < p.seq.length)) {
+      const io = p.seq[p.burstIdx + 1];
+      p.burstIdx += 2; // skip the I/O entry, point at the next CPU burst
+      p.remaining = p.seq[p.burstIdx].len;
+      if (io.len > 0) {
+        p.blockedUntil = t + io.len;
+        p.readyAt = t + io.len;
+        log.push('Time ' + t + ': ' + p.pid + ' finishes a CPU burst and leaves for I/O (' + io.len + ' units)' + (note || '') + '. It will rejoin the ready queue at time ' + (t + io.len) + '.');
+        return 'io';
+      }
+      p.readyAt = t;
+      log.push('Time ' + t + ': ' + p.pid + ' finishes a CPU burst (I/O = 0) and immediately rejoins the ready queue' + (note || '') + '.');
+      return 'ready';
+    }
+    p.ct = t;
+    log.push('Time ' + t + ': ' + p.pid + ' finishes its final CPU burst \u2014 CT = ' + t + '.');
+    return 'done';
+  }
+
+  // Per-process stats + overall summary
   function finish(ps, tl, log) {
     const rows = ps.slice().sort((a, b) => a.idx - b.idx).map(p => {
-      const tat = p.ct - p.at;                 // TAT = CT - AT
-      const wt = tat - (p.bt + p.io);          // WT = TAT - (BT + I/O)
-      const rt = p.firstStart - p.at;          // RT = first start - AT
-      return { ...p, tat, wt, rt };
+      const tat = p.ct - p.at;                       // TAT = CT - AT
+      const wt = tat - (p.totalBT + p.totalIO);      // WT  = TAT - (Total BT + Total I/O)
+      const rt = p.firstStart - p.at;                // RT  = first CPU allocation - AT
+      return { ...p, bursts: seqText(p.seq), tat, wt, rt };
     });
     const lastCT = Math.max(...rows.map(r => r.ct));
     // Context switches: CPU changes directly from one process to a DIFFERENT process.
-    // Idle -> process is not counted.
     let switches = 0;
     for (let i = 1; i < tl.length; i++) {
       const a = tl[i - 1], b = tl[i];
@@ -58,60 +134,49 @@ const Engine = (() => {
       timeline: tl, rows, log,
       summary: {
         avgTAT: avg('tat'), avgWT: avg('wt'), avgRT: avg('rt'),
-        throughput: n / lastCT,
-        switches, overhead,
-        efficiency: (1 - overhead) * 100,
-        lastCT
+        throughput: n / lastCT, switches, overhead,
+        efficiency: (1 - overhead) * 100, lastCT
       }
     };
   }
 
-  /* ---------- FCFS (non-preemptive, criteria: AT) ---------- */
-  function calculateFCFS(procs) {
-    const ps = prep(procs);
-    const order = ps.slice().sort(TIE);
-    let t = 0; const tl = [], log = [];
-    for (const p of order) {
-      if (t < p.at) {
-        addSeg(tl, 'Idle', t, p.at);
-        log.push('Time ' + t + '\u2013' + p.at + ': CPU is idle (no process has arrived yet).');
-        t = p.at;
-      }
-      p.firstStart = t;
-      log.push('Time ' + t + ': ' + p.pid + ' has the earliest arrival (AT = ' + p.at + '), so FCFS runs it to completion (BT = ' + p.bt + ').');
-      addSeg(tl, p.pid, t, t + p.bt);
-      t += p.bt; p.ct = t;
-    }
-    return finish(ps, tl, log);
-  }
-
-  /* ---------- Generic non-preemptive scheduler ---------- */
+  /* ---------- Generic non-preemptive scheduler (multi-burst aware) ---------- */
   function nonPreemptive(procs, pick, reason) {
     const ps = prep(procs);
-    let t = 0, done = 0; const tl = [], log = [];
+    let t = 0, done = 0, guard = 0;
+    const tl = [], log = [];
     while (done < ps.length) {
-      const ready = ps.filter(p => p.ct === null && p.at <= t);
+      if (++guard > LIMIT) throw new Error('Simulation exceeded limit \u2014 check your inputs.');
+      const ready = ps.filter(p => p.ct === null && p.readyAt <= t);
       if (!ready.length) {
-        const next = Math.min(...ps.filter(p => p.ct === null).map(p => p.at));
+        const next = Math.min(...ps.filter(p => p.ct === null).map(p => p.readyAt));
         addSeg(tl, 'Idle', t, next);
-        log.push('Time ' + t + '\u2013' + next + ': CPU is idle (no process has arrived yet).');
+        log.push('Time ' + t + '\u2013' + next + ': CPU is idle (no process is ready \u2014 waiting for arrivals or I/O).');
         t = next; continue;
       }
-      const p = pick(ready);
-      p.firstStart = t;
+      const p = pick(ready, t);
+      if (p.firstStart === null) p.firstStart = t;
       log.push(reason(t, p, ready));
-      addSeg(tl, p.pid, t, t + p.bt);
-      t += p.bt; p.ct = t; done++;
+      const run = p.remaining;
+      addSeg(tl, p.pid, t, t + run);
+      t += run; p.remaining = 0;
+      if (handleIOBlocking(p, t, log, '') === 'done') done++;
     }
     return finish(ps, tl, log);
   }
 
-  /* ---------- SJF (non-preemptive, criteria: BT) ---------- */
+  /* ---------- FCFS (non-preemptive, criteria: arrival / ready order) ---------- */
+  const calculateFCFS = procs => nonPreemptive(
+    procs,
+    ready => ready.slice().sort((a, b) => a.readyAt - b.readyAt || TIE(a, b))[0],
+    (t, p) => 'Time ' + t + ': ' + p.pid + ' is first in FCFS order (ready since time ' + p.readyAt + '), so it runs its CPU burst of ' + p.remaining + ' to completion.'
+  );
+
+  /* ---------- SJF (non-preemptive, criteria: next CPU burst length) ---------- */
   const calculateSJF = procs => nonPreemptive(
     procs,
-    ready => ready.slice().sort((a, b) => a.bt - b.bt || TIE(a, b))[0],
-    (t, p, ready) => 'Time ' + t + ': ready = [' + ready.map(r => r.pid + '(BT=' + r.bt + ')').join(', ') + ']. ' +
-      p.pid + ' has the shortest burst time, so SJF runs it to completion.'
+    ready => ready.slice().sort((a, b) => a.remaining - b.remaining || TIE(a, b))[0],
+    (t, p, ready) => 'Time ' + t + ': ready = [' + ready.map(r => r.pid + '(BT=' + r.remaining + ')').join(', ') + ']. ' + p.pid + ' has the shortest CPU burst, so SJF runs it to completion.'
   );
 
   /* ---------- Priority non-preemptive ---------- */
@@ -119,25 +184,27 @@ const Engine = (() => {
     procs,
     ready => ready.slice().sort((a, b) =>
       (rule === 'high' ? b.priority - a.priority : a.priority - b.priority) || TIE(a, b))[0],
-    (t, p, ready) => 'Time ' + t + ': ready = [' + ready.map(r => r.pid + '(Pr=' + r.priority + ')').join(', ') + ']. ' +
-      p.pid + ' has the best priority (' + (rule === 'high' ? 'highest' : 'lowest') + ' number wins), so it runs to completion.'
+    (t, p, ready) => 'Time ' + t + ': ready = [' + ready.map(r => r.pid + '(Pr=' + r.priority + ')').join(', ') + ']. ' + p.pid + ' has the best priority (' + (rule === 'high' ? 'highest' : 'lowest') + ' number wins), so it runs to completion.'
   );
 
-  /* ---------- Generic preemptive unit-time scheduler ---------- */
+  /* ---------- Generic preemptive unit-time scheduler (multi-burst aware) ---------- */
   function preemptiveUnit(procs, pick, describe) {
     const ps = prep(procs);
-    let t = 0, done = 0, running = null;
+    let t = 0, done = 0, running = null, guard = 0;
     const tl = [], log = [];
     while (done < ps.length) {
-      const ready = ps.filter(p => p.ct === null && p.at <= t);
+      if (++guard > LIMIT) throw new Error('Simulation exceeded limit \u2014 check your inputs.');
+      const ready = ps.filter(p => p.ct === null && p.readyAt <= t);
       if (!ready.length) { addSeg(tl, 'Idle', t, t + 1); running = null; t++; continue; }
       const p = pick(ready, t);
       if (p.firstStart === null) p.firstStart = t;
       if (running !== p.pid) log.push(describe(t, p, ready, running));
       addSeg(tl, p.pid, t, t + 1);
       p.remaining--; t++;
-      if (p.remaining === 0) { p.ct = t; done++; running = null; }
-      else running = p.pid;
+      if (p.remaining === 0) {
+        if (handleIOBlocking(p, t, log, '') === 'done') done++;
+        running = null;
+      } else running = p.pid;
     }
     return finish(ps, tl, log);
   }
@@ -171,536 +238,520 @@ const Engine = (() => {
       : 'Time ' + t + ': ' + p.pid + ' selected \u2014 best priority (' + p.priority + ') among ready processes.'
   );
 
-  /* ---------- Round Robin ---------- */
+  /* ---------- Round Robin (multi-burst aware) ---------- */
   function calculateRR(procs, qt) {
     qt = +qt;
     const ps = prep(procs);
-    const arrival = ps.slice().sort(TIE);
-    let t = 0, ai = 0, done = 0;
+    const pending = ps.slice().sort(TIE);
+    let ai = 0, t = 0, done = 0, running = null, guard = 0;
     const q = [], tl = [], log = [];
-    const enq = () => { while (ai < arrival.length && arrival[ai].at <= t) q.push(arrival[ai++]); };
-    enq();
-    while (done < ps.length) {
-      if (!q.length) {
-        const nt = arrival[ai].at;
-        addSeg(tl, 'Idle', t, nt);
-        log.push('Time ' + t + '\u2013' + nt + ': CPU is idle \u2014 ready queue is empty.');
-        t = nt; enq(); continue;
-      }
-      const p = q.shift();
-      if (p.firstStart === null) p.firstStart = t;
-      const run = Math.min(qt, p.remaining);
-      addSeg(tl, p.pid, t, t + run);
-      t += run; p.remaining -= run;
-      enq(); // arrivals during the slice join the queue BEFORE the preempted process
-      if (p.remaining > 0) {
-        q.push(p);
-        log.push('Time ' + (t - run) + '\u2013' + t + ': ' + p.pid + ' runs one quantum (QT = ' + qt + '), remaining = ' + p.remaining + ', so it goes to the back of the queue.');
-      } else {
-        p.ct = t; done++;
-        log.push('Time ' + (t - run) + '\u2013' + t + ': ' + p.pid + ' runs ' + run + ' unit(s) and finishes (CT = ' + t + ').');
-      }
-    }
-    return finish(ps, tl, log);
-  }
-
-  /* ---------- Multi-Level Queue ----------
-     levels: [{algo:'fcfs'|'sjf'|'srtf'|'rr'|'priority', qt?, rule?}] (index 0 = queue 1 = top priority)
-     Each process has p.queue (1-based). Higher queue (smaller number) preempts lower queues.
-     FCFS/SJF: non-preemptive inside their queue. SRTF/Priority: re-evaluated each unit. RR: per-queue quantum. */
-  function calculateMLQ(procs, levels) {
-    const ps = prep(procs);
-    let t = 0, done = 0, running = null, qUsed = 0;
-    const tl = [], log = [];
-    const rrOrders = levels.map(() => []);
-    const enqueued = new Set();
-
-    while (done < ps.length) {
+    const enqueueEvents = () => {
+      // 1) new arrivals, 2) I/O returns \u2014 both join BEFORE a preempted process
+      while (ai < pending.length && pending[ai].at <= t) q.push(pending[ai++]);
       for (const p of ps) {
-        if (p.ct === null && p.at <= t && !enqueued.has(p.idx)) {
-          enqueued.add(p.idx);
-          rrOrders[p.queue - 1].push(p);
+        if (p.ct === null && p.blockedUntil !== null && p.blockedUntil <= t) {
+          p.blockedUntil = null;
+          q.push(p);
+          log.push('Time ' + t + ': ' + p.pid + ' returns from I/O and joins the back of the ready queue.');
         }
       }
-      const ready = ps.filter(p => p.ct === null && p.at <= t);
-      if (!ready.length) { addSeg(tl, 'Idle', t, t + 1); t++; running = null; qUsed = 0; continue; }
-
-      const lvl = Math.min(...ready.map(p => p.queue));
-      const cfg = levels[lvl - 1];
-      let p = null;
-
-      // Can the running process continue?
-      if (running && running.ct === null && running.queue === lvl) {
-        if (cfg.algo === 'fcfs' || cfg.algo === 'sjf') p = running;              // non-preemptive inside queue
-        else if (cfg.algo === 'rr' && qUsed < cfg.qt) p = running;               // quantum not finished
+    };
+    while (done < ps.length) {
+      if (++guard > LIMIT) throw new Error('Simulation exceeded limit \u2014 check your inputs.');
+      enqueueEvents();
+      if (running && running.qUsed === qt) { // quantum expired with CPU work left
+        log.push('Time ' + t + ': ' + running.pid + ' used its full quantum (QT = ' + qt + '), remaining = ' + running.remaining + ' \u2014 it goes to the back of the queue.');
+        running.qUsed = 0; q.push(running); running = null;
       }
-
-      if (!p) {
-        const cand = ready.filter(x => x.queue === lvl);
-        if (cfg.algo === 'fcfs') p = cand.slice().sort(TIE)[0];
-        else if (cfg.algo === 'sjf') p = cand.slice().sort((a, b) => a.bt - b.bt || TIE(a, b))[0];
-        else if (cfg.algo === 'srtf') p = cand.slice().sort((a, b) => a.remaining - b.remaining || TIE(a, b))[0];
-        else if (cfg.algo === 'priority') {
-          const rule = cfg.rule || 'low';
-          p = cand.slice().sort((a, b) =>
-            (rule === 'high' ? b.priority - a.priority : a.priority - b.priority) || TIE(a, b))[0];
-        } else if (cfg.algo === 'rr') {
-          const arr = rrOrders[lvl - 1];
-          if (running && running.queue === lvl && running.ct === null && qUsed >= cfg.qt) {
-            const i = arr.indexOf(running);
-            if (i > -1) { arr.splice(i, 1); arr.push(running); }
-          }
-          p = arr.filter(x => x.ct === null && x.at <= t)[0];
-        }
-        qUsed = 0;
+      if (!running) {
+        if (!q.length) { addSeg(tl, 'Idle', t, t + 1); t++; continue; }
+        running = q.shift();
+        if (running.firstStart === null) running.firstStart = t;
+        log.push('Time ' + t + ': ' + running.pid + ' is at the front of the ready queue \u2014 it runs (remaining = ' + running.remaining + ').');
       }
-
-      if (p.firstStart === null) p.firstStart = t;
-      if (!running || running.pid !== p.pid) {
-        log.push('Time ' + t + ': Queue ' + lvl + ' (' + cfg.algo.toUpperCase() + (cfg.algo === 'rr' ? ', QT=' + cfg.qt : '') + ') is the highest non-empty queue \u2192 selects ' + p.pid + (running ? ' (replacing ' + running.pid + ')' : '') + '.');
+      addSeg(tl, running.pid, t, t + 1);
+      running.remaining--; running.qUsed++; t++;
+      if (running.remaining === 0) {
+        const res = handleIOBlocking(running, t, log, ' before using its full quantum');
+        if (res === 'done') done++;
+        else if (res === 'ready') q.push(running);
+        running = null;
       }
-      qUsed = (running && running.pid === p.pid) ? qUsed + 1 : 1;
-      addSeg(tl, p.pid, t, t + 1);
-      p.remaining--; t++;
-      if (p.remaining === 0) { p.ct = t; done++; running = null; qUsed = 0; }
-      else running = p;
     }
     return finish(ps, tl, log);
   }
 
-  /* ---------- Dispatcher ---------- */
-  function run(algo, procs, opts) {
-    opts = opts || {};
+  /* ---------- MLFQ \u2014 Multi-Level Feedback Queue ----------
+     levels: [{qt}, {qt}, ...] where index 0 = Queue 1 = HIGHEST priority.
+     Rules implemented:
+     - Every process enters Queue 1 (highest) when it arrives.
+     - Same queue level -> Round Robin with that queue's quantum.
+     - Full quantum used + CPU work remaining -> demoted ONE queue down
+       (never below the lowest queue; at the lowest it just goes to the back = RR).
+     - Gives up the CPU before the quantum ends (finishes a burst / goes to I/O)
+       -> STAYS at the same level. I/O returns re-enter the SAME queue level.
+     - A ready process in a higher queue ALWAYS preempts lower queues:
+       lower queues never run while a higher queue has a ready process.       */
+  function calculateMLFQ(procs, levels) {
+    const ps = prep(procs);
+    const L = levels.length;
+    const qtOf = lvl => +levels[lvl - 1].qt;
+    const queues = Array.from({ length: L }, () => []);
+    const pending = ps.slice().sort(TIE);
+    let ai = 0, t = 0, done = 0, running = null, guard = 0;
+    const tl = [], log = [];
+
+    const admitEvents = () => {
+      while (ai < pending.length && pending[ai].at <= t) {
+        const p = pending[ai++];
+        p.level = 1; queues[0].push(p);
+        log.push('Time ' + t + ': ' + p.pid + ' arrives and enters Queue 1 (the highest priority queue).');
+      }
+      for (const p of ps) {
+        if (p.ct === null && p.blockedUntil !== null && p.blockedUntil <= t) {
+          p.blockedUntil = null;
+          queues[p.level - 1].push(p);
+          log.push('Time ' + t + ': ' + p.pid + ' returns from I/O and rejoins Queue ' + p.level + ' \u2014 it kept its level because it gave up the CPU before its quantum ended.');
+        }
+      }
+    };
+    const highestNonEmpty = () => { for (let i = 0; i < L; i++) if (queues[i].length) return i + 1; return null; };
+
+    while (done < ps.length) {
+      if (++guard > LIMIT) throw new Error('Simulation exceeded limit \u2014 check your inputs.');
+      admitEvents();
+
+      // 1) Quantum expiry: full QT used and CPU work remains -> demote one level
+      if (running && running.qUsed === qtOf(running.level)) {
+        const from = running.level;
+        running.level = Math.min(L, running.level + 1);
+        running.qUsed = 0;
+        queues[running.level - 1].push(running);
+        log.push('Time ' + t + ': ' + running.pid + ' used the FULL quantum of Queue ' + from + ' (QT = ' + qtOf(from) + ') and still has ' + running.remaining + ' CPU units left \u2014 ' + (running.level === from
+          ? 'it is already in the lowest queue, so it goes to the back of Queue ' + from + ' (Round Robin).'
+          : 'its priority is decreased: it moves down to Queue ' + running.level + '.'));
+        running = null;
+      }
+      // 2) Preemption: a ready process in a strictly higher queue wins
+      if (running) {
+        const hi = highestNonEmpty();
+        if (hi !== null && hi < running.level) {
+          log.push('Time ' + t + ': ' + running.pid + ' (Queue ' + running.level + ') is preempted \u2014 Queue ' + hi + ' has a ready process and higher queues always run first. ' + running.pid + ' stays at Queue ' + running.level + '.');
+          running.qUsed = 0;
+          queues[running.level - 1].unshift(running); // did not finish its quantum: front of its own queue
+          running = null;
+        }
+      }
+      // 3) Dispatch from the highest non-empty queue
+      if (!running) {
+        const hi = highestNonEmpty();
+        if (hi === null) { addSeg(tl, 'Idle', t, t + 1); t++; continue; }
+        running = queues[hi - 1].shift();
+        if (running.firstStart === null) running.firstStart = t;
+        const sameLevel = queues[hi - 1].length;
+        const lowerWaiting = queues.slice(hi).reduce((s, qq) => s + qq.length, 0);
+        log.push('Time ' + t + ': Queue ' + hi + ' is the highest non-empty queue \u2014 ' + running.pid + ' runs' +
+          (sameLevel ? ' (Round Robin with ' + sameLevel + ' other process' + (sameLevel > 1 ? 'es' : '') + ' at this level, QT = ' + qtOf(hi) + ')' : ' (QT = ' + qtOf(hi) + ')') +
+          (lowerWaiting ? '; ' + lowerWaiting + ' lower-queue process' + (lowerWaiting > 1 ? 'es' : '') + ' must wait.' : '.'));
+      }
+      // 4) Run one time unit
+      addSeg(tl, running.pid, t, t + 1);
+      running.remaining--; running.qUsed++; t++;
+      if (running.remaining === 0) {
+        const usedFull = running.qUsed === qtOf(running.level);
+        const res = handleIOBlocking(running, t, log, usedFull ? '' : ' before its quantum ended, so it STAYS in Queue ' + running.level);
+        if (res === 'done') done++;
+        else if (res === 'ready') queues[running.level - 1].push(running);
+        running = null;
+      }
+    }
+    return finish(ps, tl, log);
+  }
+
+  /* ---------- dispatcher ---------- */
+  function run(algo, procs, opts = {}) {
     switch (algo) {
       case 'fcfs': return calculateFCFS(procs);
       case 'sjf': return calculateSJF(procs);
       case 'srtf': return calculateSRTF(procs);
       case 'rr': return calculateRR(procs, opts.qt);
       case 'priority-np': return calculatePriorityNP(procs, opts.rule || 'low');
-      case 'priority-p': return calculatePriorityP(procs, opts.rule || 'low', opts.aging || 0);
-      case 'mlq': return calculateMLQ(procs, opts.levels);
+      case 'priority-p': return calculatePriorityP(procs, opts.rule || 'low', +opts.aging || 0);
+      case 'mlq': // legacy value, now treated as MLFQ
+      case 'mlfq': return calculateMLFQ(procs, (opts.levels && opts.levels.length) ? opts.levels : [{ qt: 2 }, { qt: 4 }, { qt: 8 }]);
       default: throw new Error('Unknown algorithm: ' + algo);
     }
   }
 
-  return { calculateFCFS, calculateSJF, calculateSRTF, calculateRR, calculatePriorityNP, calculatePriorityP, calculateMLQ, run };
+  return {
+    run, parseBurstSequence, calculateTotalBT, calculateTotalIO, seqText,
+    calculateFCFS, calculateSJF, calculateSRTF, calculateRR,
+    calculatePriorityNP, calculatePriorityP, calculateMLFQ,
+    calculatePriorityNonPreemptive: calculatePriorityNP,
+    calculatePriorityPreemptive: calculatePriorityP
+  };
 })();
 
 /* ============================ GENERATOR ============================ */
 const Generator = (() => {
   const ri = (a, b) => a + Math.floor(Math.random() * (b - a + 1));
-  const pick = arr => arr[ri(0, arr.length - 1)];
+  const pickFrom = arr => arr[ri(0, arr.length - 1)];
 
-  const NAMES = {
-    'fcfs': 'FCFS (First Come First Serve, non-preemptive)',
-    'sjf': 'SJF (Shortest Job First, non-preemptive)',
-    'srtf': 'SRTF (Shortest Remaining Time First, preemptive)',
-    'rr': 'Round Robin (preemptive)',
+  const ALGO_LABEL = {
+    fcfs: 'FCFS (First Come First Serve, non-preemptive)',
+    sjf: 'SJF (Shortest Job First, non-preemptive)',
+    srtf: 'SRTF (Shortest Remaining Time First, preemptive)',
+    rr: 'Round Robin',
     'priority-np': 'Priority Scheduling (non-preemptive)',
     'priority-p': 'Priority Scheduling (preemptive)',
-    'mlq': 'Multi-Level Queue'
+    mlfq: 'MLFQ (Multi-Level Feedback Queue)'
   };
+  const TAG = {
+    fcfs: 'FCFS', sjf: 'SJF', srtf: 'SRTF', rr: 'RR',
+    'priority-np': 'PRIORITY NP', 'priority-p': 'PRIORITY P', mlfq: 'MLFQ'
+  };
+  const needsQT = a => a === 'rr' || a === 'mlfq';
 
-  function generateProcesses(s, usePriority, useQueue) {
+  function generateProcesses(s, algo) {
+    const n = Math.min(8, Math.max(2, s.n));
     const procs = [];
-    for (let i = 0; i < s.n; i++) {
+    for (let i = 0; i < n; i++) {
       procs.push({
         pid: 'P' + (i + 1),
         at: ri(0, Math.max(0, s.atMax)),
         bt: ri(s.btMin, s.btMax),
-        priority: usePriority ? ri(1, Math.max(4, s.n)) : '',
-        io: s.includeIO ? ri(0, 2) : 0,
-        queue: useQueue ? ri(1, 2) : 1
+        priority: ri(1, Math.max(3, Math.min(9, n))),
+        io: (!s.multi && s.includeIO) ? ri(1, 3) : 0
       });
     }
-    // Guarantee something arrives reasonably early
-    procs[0].at = Math.min(procs[0].at, 1);
-
-    // Difficulty adjustments ("professor tricks")
-    if (s.diff === 'easy') {
-      procs.forEach((p, i) => { p.at = Math.min(p.at, i * 2); p.io = 0; });
-    }
-    if (s.diff === 'hard' || s.diff === 'tricky') {
-      if (s.n >= 2) procs[1].at = procs[0].at;                 // arrival tie
-    }
+    procs.sort((a, b) => a.at - b.at);
+    procs.forEach((p, i) => { p.pid = 'P' + (i + 1); });
+    // difficulty tweaks (exam-style hidden details)
+    if (s.diff === 'hard' || s.diff === 'tricky') procs[1].at = procs[0].at;      // arrival tie
     if (s.diff === 'tricky') {
-      if (s.n >= 3) procs[2].bt = procs[1].bt;                 // equal burst times
-      if (usePriority && s.n >= 4) procs[3].priority = procs[0].priority; // equal priorities
-      const maxAT = Math.max(...procs.slice(0, s.n - 1).map(p => p.at));
-      procs[s.n - 1].at = maxAT + ri(3, 6);                    // possible CPU idle gap
+      procs[1].bt = procs[0].bt;                                                 // equal bursts
+      if (algo.indexOf('priority') === 0) procs[1].priority = procs[0].priority; // equal priorities
+      procs[procs.length - 1].at = Math.max(procs[procs.length - 1].at, procs[0].bt + procs[1].bt + 2); // idle gap chance
+    }
+    if (s.multi) {
+      // at least half of the processes get CPU/I-O burst sequences
+      const count = Math.max(1, Math.ceil(n / 2));
+      for (let k = 0; k < count; k++) {
+        const p = procs[(k * 2) % n];
+        let str = p.bt + ', I' + ri(1, 4) + ', ' + ri(s.btMin, s.btMax);
+        if (Math.random() < 0.35) str += ', I' + ri(1, 3) + ', ' + ri(s.btMin, s.btMax);
+        p.bursts = str;
+      }
     }
     return procs;
   }
 
   function generateQuestion(s) {
-    const algo = s.algo === 'mixed'
-      ? pick(['fcfs', 'sjf', 'srtf', 'rr', 'priority-np', 'priority-p'])
-      : s.algo;
-    const usePriority = algo === 'priority-np' || algo === 'priority-p';
-    const rule = s.rule === 'random' ? pick(['low', 'high']) : s.rule;
-    const qt = algo === 'rr' ? (s.qtMode === 'fixed' ? +s.qt : ri(2, 4)) : null;
-
-    let mlq = null;
-    const procs = generateProcesses(s, usePriority, algo === 'mlq');
-    if (algo === 'mlq') {
-      mlq = { levels: [{ algo: 'rr', qt: ri(2, 3) }, { algo: 'fcfs' }] };
-      procs.forEach(p => { p.queue = ri(1, 2); });
-      procs[0].queue = 1; // make sure queue 1 is used
+    const pool = ['fcfs', 'sjf', 'srtf', 'rr', 'priority-np', 'priority-p'];
+    const algo = s.algo === 'mixed' ? pickFrom(pool) : (s.algo === 'mlq' ? 'mlfq' : s.algo);
+    const rule = s.rule === 'random' ? pickFrom(['low', 'high']) : s.rule;
+    const qt = needsQT(algo) ? (s.qtMode === 'fixed' ? Math.max(1, +s.qt || 2) : ri(2, 4)) : null;
+    let levels = null;
+    if (algo === 'mlfq') {
+      const L = ri(2, 3);
+      levels = [];
+      for (let i = 0; i < L; i++) levels.push({ qt: qt * Math.pow(2, i) });
     }
+    const procs = generateProcesses(s, algo);
+    const usedIO = s.includeIO && !s.multi;
 
-    let statement = 'Consider the following ' + s.n + ' processes. Using ' + NAMES[algo] + ' scheduling';
-    if (algo === 'rr') statement += ' with Quantum Time QT = ' + qt;
-    if (usePriority) statement += ', where the ' + (rule === 'high' ? 'HIGHEST' : 'LOWEST') + ' priority number means higher priority';
-    if (algo === 'mlq') statement += '. Queue 1 (highest priority) uses Round Robin with QT = ' + mlq.levels[0].qt + ', and Queue 2 uses FCFS. A process in Queue 1 preempts Queue 2';
-    statement += ', draw the Gantt chart and compute CT, TAT, WT and RT for every process, then find the average TAT / WT / RT, throughput, number of context switches, overhead and CPU efficiency.';
-    if (s.includeIO) statement += ' Note: I/O time is given for each process, and WT = TAT \u2212 (BT + I/O).';
+    let st = 'Consider the following ' + procs.length + ' processes. Using ' + ALGO_LABEL[algo] + ' scheduling';
+    if (algo === 'rr') st += ' with quantum time QT = ' + qt;
+    if (algo.indexOf('priority') === 0) st += ' where the ' + (rule === 'high' ? 'HIGHEST' : 'LOWEST') + ' priority number wins';
+    st += ', draw the Gantt chart and compute CT, TAT, WT and RT for every process, then find the average TAT / WT / RT, throughput, number of context switches, overhead and CPU efficiency.';
+    if (algo === 'mlfq') {
+      st += ' MLFQ rules: every process enters Queue 1 (highest priority) on arrival; ' +
+        levels.map((l, i) => 'Queue ' + (i + 1) + ' QT = ' + l.qt).join(', ') +
+        '. Processes at the same level run Round Robin. A process that uses its full quantum and still needs CPU is demoted one queue; giving up the CPU before the quantum ends keeps its level; a ready process in a higher queue always preempts lower queues.';
+    }
+    if (s.multi) st += ' Burst sequences alternate CPU and I/O bursts (example: "5, I3, 4" = CPU 5 \u2192 I/O 3 \u2192 CPU 4). A process is blocked during I/O and rejoins the ready queue when its I/O finishes.';
+    if (usedIO) st += ' I/O time is counted in the waiting-time formula: WT = TAT \u2212 (BT + I/O).';
 
-    return { algo, rule, qt, mlq, procs, statement, usePriority, includeIO: s.includeIO, algoName: NAMES[algo] };
+    return {
+      algo, algoLabel: ALGO_LABEL[algo], tag: TAG[algo],
+      procs, qt: algo === 'rr' ? qt : null, rule, levels,
+      statement: st, multi: !!s.multi, usedIO
+    };
   }
 
-  return { generateQuestion };
+  return { generateQuestion, generateProcesses, ri };
 })();
 
-/* Export for Node.js tests */
-if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { Engine, Generator };
-}
-
 /* ============================ UI ============================ */
-if (typeof document !== 'undefined') (function () {
-
+if (typeof document !== 'undefined') (function UI() {
   const $ = id => document.getElementById(id);
-  const fmt = x => Number.isInteger(x) ? String(x) : (+x.toFixed(3)).toString();
-
+  const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   const PALETTE = ['#5E9FE8', '#EAC26B', '#72BC8F', '#BF8EDA', '#DE9255', '#DF84A8', '#4FB9C9', '#E97366'];
-  const ALGO_LABEL = {
-    'fcfs': 'FCFS', 'sjf': 'SJF', 'srtf': 'SRTF', 'rr': 'Round Robin',
-    'priority-np': 'Priority (Non-Preemptive)', 'priority-p': 'Priority (Preemptive)', 'mlq': 'Multi-Level Queue'
-  };
 
-  /* ---------- View switching ---------- */
-  function switchView(name) {
-    document.querySelectorAll('.view').forEach(v => { v.hidden = v.id !== 'view-' + name; });
-    document.querySelectorAll('.nav-btn').forEach(b => b.classList.toggle('active', b.dataset.view === name));
-    window.scrollTo({ top: 0 });
+  /* ---------- view switching ---------- */
+  const views = ['home', 'solver', 'practice', 'formulas'];
+  function show(view) {
+    views.forEach(v => { $('view-' + v).hidden = v !== view; });
+    document.querySelectorAll('.nav-btn').forEach(b => b.classList.toggle('active', b.dataset.view === view));
+    window.scrollTo(0, 0);
   }
-  document.querySelectorAll('.nav-btn').forEach(b => b.addEventListener('click', () => switchView(b.dataset.view)));
-  document.querySelectorAll('.mode-card').forEach(c => c.addEventListener('click', () => switchView(c.dataset.goto)));
+  document.querySelectorAll('.nav-btn').forEach(b => b.addEventListener('click', () => show(b.dataset.view)));
+  document.querySelectorAll('.mode-card').forEach(c => c.addEventListener('click', () => show(c.dataset.goto)));
 
-  /* ---------- Solver: options visibility ---------- */
-  function currentAlgo() { return $('algo').value; }
-
-  function updateOptions() {
-    const a = currentAlgo();
-    const isPriority = a === 'priority-np' || a === 'priority-p';
-    $('opt-qt').hidden = a !== 'rr';
-    $('opt-rule').hidden = !(isPriority || a === 'mlq');
-    $('opt-aging').hidden = a !== 'priority-p';
-    $('mlq-config').hidden = a !== 'mlq';
-    const needPriorityCol = isPriority || a === 'mlq';
-    document.querySelectorAll('.col-priority').forEach(el => el.classList.toggle('hide', !needPriorityCol));
-    document.querySelectorAll('.col-queue').forEach(el => el.classList.toggle('hide', a !== 'mlq'));
-    if (a === 'mlq') buildMLQRows();
+  /* ---------- solver: option visibility (QT only where needed) ---------- */
+  const algoSel = $('algo');
+  const isPriority = a => a === 'priority-np' || a === 'priority-p';
+  // hidden attribute can be overridden by CSS display rules on labels,
+  // so toggle display directly as well
+  const setVis = (el, show) => { el.hidden = !show; el.style.display = show ? '' : 'none'; };
+  function updateQuantumVisibility() {
+    const a = algoSel.value;
+    setVis($('opt-qt'), a === 'rr');            // QT: only Round Robin
+    setVis($('opt-rule'), isPriority(a));
+    setVis($('opt-aging'), isPriority(a));
+    setVis($('mlfq-config'), a === 'mlfq');     // per-queue QTs: only MLFQ
+    document.querySelectorAll('#ptable .col-priority').forEach(el => el.classList.toggle('hide', !isPriority(a)));
+    if (a === 'mlfq') buildMlfqRows();
   }
-  $('algo').addEventListener('change', updateOptions);
+  algoSel.addEventListener('change', updateQuantumVisibility);
 
-  /* ---------- MLQ config rows ---------- */
-  function buildMLQRows() {
-    const n = Math.min(4, Math.max(2, +$('mlq-levels').value || 2));
-    $('mlq-levels').value = n;
-    const host = $('mlq-rows');
-    const prev = collectMLQLevels(true);
-    host.innerHTML = '';
+  function buildMlfqRows() {
+    const n = Math.min(4, Math.max(2, +$('mlfq-levels').value || 3));
+    const wrap = $('mlfq-rows');
+    const old = [...wrap.querySelectorAll('input')].map(i => i.value);
+    const defaults = [2, 4, 8, 16];
+    wrap.innerHTML = '';
     for (let i = 0; i < n; i++) {
       const row = document.createElement('div');
       row.className = 'mlq-row';
-      row.innerHTML =
-        '<div class="lvl">Queue ' + (i + 1) + (i === 0 ? ' \u2b50' : '') + '</div>' +
-        '<label>Algorithm <select class="mlq-algo">' +
-        '<option value="fcfs">FCFS</option><option value="sjf">SJF</option>' +
-        '<option value="srtf">SRTF</option><option value="rr">Round Robin</option>' +
-        '<option value="priority">Priority</option></select></label>' +
-        '<label class="mlq-qt-wrap">Quantum (RR only) <input type="number" class="mlq-qt" min="1" value="2"></label>';
-      host.appendChild(row);
-      if (prev[i]) {
-        row.querySelector('.mlq-algo').value = prev[i].algo;
-        if (prev[i].qt) row.querySelector('.mlq-qt').value = prev[i].qt;
-      }
+      row.innerHTML = '<strong>Queue ' + (i + 1) + (i === 0 ? ' \u2014 highest priority' : (i === n - 1 ? ' \u2014 lowest priority' : '')) + '</strong>' +
+        '<label>Quantum (QT) <input type="number" min="1" class="mlfq-qt" value="' + (old[i] || defaults[i]) + '"></label>';
+      wrap.appendChild(row);
     }
   }
-  $('mlq-levels').addEventListener('change', buildMLQRows);
+  $('mlfq-levels').addEventListener('input', buildMlfqRows);
 
-  function collectMLQLevels(silent) {
-    const rows = document.querySelectorAll('#mlq-rows .mlq-row');
-    const levels = [];
-    rows.forEach(r => {
-      levels.push({
-        algo: r.querySelector('.mlq-algo').value,
-        qt: +r.querySelector('.mlq-qt').value || 2,
-        rule: $('rule').value
-      });
-    });
-    return levels;
-  }
-
-  /* ---------- Solver: process table ---------- */
-  let rowCount = 0;
-  function addRow(p) {
-    p = p || {};
-    rowCount++;
+  /* ---------- solver: process rows ---------- */
+  const pbody = $('pbody');
+  function addRow(vals = {}) {
     const tr = document.createElement('tr');
     tr.innerHTML =
-      '<td><input class="pid-in" type="text" value="' + (p.pid || 'P' + rowCount) + '" aria-label="PID"></td>' +
-      '<td><input class="at-in" type="number" min="0" value="' + (p.at != null ? p.at : 0) + '" aria-label="Arrival time"></td>' +
-      '<td><input class="bt-in" type="number" min="1" value="' + (p.bt != null ? p.bt : 1) + '" aria-label="Burst time"></td>' +
-      '<td class="col-priority' + (document.querySelector('th.col-priority').classList.contains('hide') ? ' hide' : '') + '"><input class="pr-in" type="number" value="' + (p.priority != null ? p.priority : 1) + '" aria-label="Priority"></td>' +
-      '<td><input class="io-in" type="number" min="0" value="' + (p.io != null ? p.io : 0) + '" aria-label="IO time"></td>' +
-      '<td class="col-queue' + (document.querySelector('th.col-queue').classList.contains('hide') ? ' hide' : '') + '"><input class="q-in" type="number" min="1" value="' + (p.queue != null ? p.queue : 1) + '" aria-label="Queue level"></td>' +
-      '<td><button class="btn ghost danger small" type="button">Remove</button></td>';
-    tr.querySelector('button').addEventListener('click', () => tr.remove());
-    $('pbody').appendChild(tr);
-  }
-
-  function resetTable() {
-    $('pbody').innerHTML = '';
-    rowCount = 0;
-    $('solver-error').hidden = true;
-    $('solver-results').innerHTML = '';
-  }
-
-  function loadSample() {
-    resetTable();
-    [{ pid: 'P1', at: 0, bt: 5, priority: 2, io: 0 },
-     { pid: 'P2', at: 1, bt: 3, priority: 1, io: 0 },
-     { pid: 'P3', at: 2, bt: 8, priority: 3, io: 0 },
-     { pid: 'P4', at: 3, bt: 6, priority: 2, io: 0 }].forEach(addRow);
-    $('qt').value = 2;
+      '<td><input class="f-pid" value="' + esc(vals.pid != null ? vals.pid : 'P' + (pbody.children.length + 1)) + '"></td>' +
+      '<td><input class="f-at" type="number" min="0" value="' + esc(vals.at != null ? vals.at : 0) + '"></td>' +
+      '<td><input class="f-bt" placeholder="5   or   5, I3, 4" value="' + esc(vals.bt != null ? vals.bt : '') + '"></td>' +
+      '<td class="col-priority"><input class="f-pr" type="number" value="' + esc(vals.priority != null ? vals.priority : '') + '"></td>' +
+      '<td><input class="f-io" type="number" min="0" value="' + esc(vals.io != null ? vals.io : 0) + '"></td>' +
+      '<td><button class="btn ghost danger btn-remove">Remove</button></td>';
+    tr.querySelector('.btn-remove').addEventListener('click', () => tr.remove());
+    tr.querySelector('.col-priority').classList.toggle('hide', !isPriority(algoSel.value));
+    pbody.appendChild(tr);
   }
 
   function collectProcesses() {
-    const algo = currentAlgo();
-    const needPriority = algo === 'priority-np' || algo === 'priority-p' ||
-      (algo === 'mlq' && collectMLQLevels().some(l => l.algo === 'priority'));
-    const rows = document.querySelectorAll('#pbody tr');
-    const errors = [], procs = [], seen = new Set();
-    if (!rows.length) errors.push('Add at least one process.');
-    rows.forEach((r, i) => {
-      const pid = r.querySelector('.pid-in').value.trim() || ('P' + (i + 1));
-      const at = r.querySelector('.at-in').value;
-      const bt = r.querySelector('.bt-in').value;
-      const pr = r.querySelector('.pr-in').value;
-      const io = r.querySelector('.io-in').value;
-      const qu = r.querySelector('.q-in').value;
-      if (seen.has(pid)) errors.push('Duplicate PID "' + pid + '" \u2014 PIDs must be unique.');
+    const rows = [...pbody.children];
+    if (!rows.length) throw new Error('Add at least one process.');
+    const seen = new Set(), procs = [];
+    const needPr = isPriority(algoSel.value);
+    rows.forEach((tr, i) => {
+      const pid = tr.querySelector('.f-pid').value.trim();
+      const at = tr.querySelector('.f-at').value.trim();
+      const btText = tr.querySelector('.f-bt').value.trim();
+      const pr = tr.querySelector('.f-pr').value.trim();
+      const io = tr.querySelector('.f-io').value.trim();
+      if (!pid) throw new Error('Row ' + (i + 1) + ': PID is required.');
+      if (seen.has(pid)) throw new Error('Duplicate PID "' + pid + '" \u2014 every process needs a unique name.');
       seen.add(pid);
-      if (at === '' || isNaN(+at) || +at < 0) errors.push(pid + ': Arrival Time must be a number \u2265 0.');
-      if (bt === '' || isNaN(+bt) || +bt <= 0) errors.push(pid + ': Burst Time must be a number > 0.');
-      if (io === '' || isNaN(+io) || +io < 0) errors.push(pid + ': I/O Time must be a number \u2265 0.');
-      if (needPriority && (pr === '' || isNaN(+pr))) errors.push(pid + ': Priority must be numeric for this algorithm.');
-      if (algo === 'mlq') {
-        const levels = collectMLQLevels().length;
-        if (qu === '' || isNaN(+qu) || +qu < 1 || +qu > levels) errors.push(pid + ': Queue must be between 1 and ' + levels + '.');
-      }
-      procs.push({ pid, at: +at, bt: +bt, priority: pr === '' ? null : +pr, io: +io || 0, queue: +qu || 1 });
+      if (at === '' || isNaN(+at) || +at < 0) throw new Error(pid + ': Arrival Time must be a number \u2265 0.');
+      if (!btText) throw new Error(pid + ': Burst is required \u2014 a number like "5" or a sequence like "5, I3, 4".');
+      let seq;
+      try { seq = Engine.parseBurstSequence(btText); }
+      catch (e) { throw new Error(pid + ': ' + e.message); }
+      if (io !== '' && (isNaN(+io) || +io < 0)) throw new Error(pid + ': I/O Time must be a number \u2265 0.');
+      if (needPr && (pr === '' || isNaN(+pr))) throw new Error(pid + ': Priority is required for priority scheduling.');
+      procs.push({ pid, at: +at, bursts: seq, io: io === '' ? 0 : +io, priority: pr === '' ? null : +pr });
     });
-    if (algo === 'rr' && (!$('qt').value || +$('qt').value <= 0)) errors.push('Quantum Time must be a number > 0 for Round Robin.');
-    return { procs, errors };
+    return procs;
   }
 
-  /* ---------- Rendering ---------- */
-  function colorMap(timeline) {
-    const map = {}; let i = 0;
-    timeline.forEach(s => {
-      if (s.pid !== 'Idle' && !(s.pid in map)) { map[s.pid] = PALETTE[i % PALETTE.length]; i++; }
-    });
-    return map;
+  function collectOpts() {
+    const a = algoSel.value;
+    const opts = {};
+    if (a === 'rr') {
+      opts.qt = +$('qt').value;
+      if (!(opts.qt > 0)) throw new Error('Quantum Time (QT) must be a number > 0 for Round Robin.');
+    }
+    if (isPriority(a)) { opts.rule = $('rule').value; opts.aging = +$('aging').value || 0; }
+    if (a === 'mlfq') {
+      if (!document.querySelector('#mlfq-rows .mlfq-qt')) buildMlfqRows();
+      opts.levels = [...document.querySelectorAll('#mlfq-rows .mlfq-qt')].map(inp => ({ qt: +inp.value }));
+      if (opts.levels.some(l => !(l.qt > 0))) throw new Error('Every MLFQ queue needs a quantum > 0.');
+    }
+    return opts;
   }
 
-  function ganttHTML(timeline) {
-    const total = timeline[timeline.length - 1].end;
-    const start = timeline[0].start;
-    const span = total - start;
-    const colors = colorMap(timeline);
-    let html = '<div class="gantt-track">';
-    timeline.forEach((s, i) => {
-      const w = Math.max(4, (s.end - s.start) / span * 100);
-      const idle = s.pid === 'Idle';
-      html += '<div class="g-block' + (idle ? ' idle' : '') + '" style="flex-grow:' + (s.end - s.start) +
-        ';' + (idle ? '' : 'background:' + colors[s.pid] + ';') + '" title="' + s.pid + ': ' + s.start + '\u2013' + s.end + '">' +
-        '<span>' + s.pid + '</span><span class="g-t">' + s.start + '</span>' +
-        (i === timeline.length - 1 ? '<span class="g-tend">' + s.end + '</span>' : '') +
-        '</div>';
-    });
-    html += '</div>';
-    return html;
+  function labelOf(a, opts) {
+    switch (a) {
+      case 'fcfs': return 'FCFS';
+      case 'sjf': return 'SJF';
+      case 'srtf': return 'SRTF';
+      case 'rr': return 'Round Robin (QT = ' + opts.qt + ')';
+      case 'priority-np': return 'Priority \u2014 Non-Preemptive (' + (opts.rule === 'high' ? 'highest' : 'lowest') + ' number wins)';
+      case 'priority-p': return 'Priority \u2014 Preemptive (' + (opts.rule === 'high' ? 'highest' : 'lowest') + ' number wins)';
+      case 'mlfq': return 'MLFQ (' + opts.levels.map((l, i) => 'Q' + (i + 1) + ' QT=' + l.qt).join(', ') + ')';
+      default: return a;
+    }
   }
 
+  /* ---------- shared solution renderer ---------- */
+  const SEC = 'margin:20px 0 8px;font-size:12.5px;font-weight:700;letter-spacing:.09em;text-transform:uppercase;color:var(--text2)';
   function renderResults(container, res, meta) {
-    const s = res.summary;
-    const showPriority = res.rows.some(r => r.priority != null);
-    const showQueue = meta.algo === 'mlq';
-    const showIO = res.rows.some(r => r.io > 0);
+    const colors = {}; let ci = 0;
+    res.timeline.forEach(s => { if (s.pid !== 'Idle' && !(s.pid in colors)) colors[s.pid] = PALETTE[ci++ % PALETTE.length]; });
+    const lastEnd = res.timeline[res.timeline.length - 1].end;
 
-    let table = '<div class="table-wrap"><table><thead><tr>' +
-      '<th>PID</th><th>AT</th><th>BT</th>' +
-      (showPriority ? '<th>Priority</th>' : '') +
-      (showQueue ? '<th>Queue</th>' : '') +
-      (showIO ? '<th>I/O</th>' : '') +
-      '<th>First Start</th><th>CT</th><th>TAT</th><th>WT</th><th>RT</th></tr></thead><tbody>';
-    res.rows.forEach(r => {
-      table += '<tr><td><b>' + r.pid + '</b></td><td>' + r.at + '</td><td>' + r.bt + '</td>' +
-        (showPriority ? '<td>' + (r.priority != null ? r.priority : '\u2014') + '</td>' : '') +
-        (showQueue ? '<td>' + r.queue + '</td>' : '') +
-        (showIO ? '<td>' + r.io + '</td>' : '') +
-        '<td>' + r.firstStart + '</td><td>' + r.ct + '</td><td>' + r.tat + '</td><td>' + r.wt + '</td><td>' + r.rt + '</td></tr>';
-    });
-    table += '</tbody></table></div>';
+    const gantt = '<div class="gantt"><div class="gantt-track">' + res.timeline.map((s, i) =>
+      '<div class="g-block' + (s.pid === 'Idle' ? ' idle' : '') + '" style="width:' + (((s.end - s.start) / lastEnd) * 100) + '%;' +
+      (s.pid === 'Idle' ? '' : 'background:' + colors[s.pid]) + '">' + esc(s.pid) +
+      '<i class="g-t">' + s.start + '</i>' +
+      (i === res.timeline.length - 1 ? '<i class="g-tend">' + s.end + '</i>' : '') +
+      '</div>').join('') + '</div></div>';
 
+    const anyMulti = res.rows.some(r => r.multi);
+    const showPr = !!meta.showPriority;
+    let head = '<tr><th>PID</th><th>AT</th>' + (anyMulti ? '<th>Bursts (CPU / I-O)</th>' : '') + '<th>' + (anyMulti ? 'Total BT' : 'BT') + '</th>' +
+      (showPr ? '<th>Priority</th>' : '') + '<th>' + (anyMulti ? 'Total I/O' : 'I/O') + '</th><th>First Start</th><th>CT</th><th>TAT</th><th>WT</th><th>RT</th></tr>';
+    const body = res.rows.map(r =>
+      '<tr><td><strong>' + esc(r.pid) + '</strong></td><td>' + r.at + '</td>' +
+      (anyMulti ? '<td>' + esc(r.bursts) + '</td>' : '') +
+      '<td>' + r.totalBT + '</td>' +
+      (showPr ? '<td>' + (r.priority == null ? '\u2014' : r.priority) + '</td>' : '') +
+      '<td>' + r.totalIO + '</td><td>' + r.firstStart + '</td><td>' + r.ct + '</td><td>' + r.tat + '</td><td>' + r.wt + '</td><td>' + r.rt + '</td></tr>').join('');
+
+    const f = x => (Math.round(x * 1000) / 1000);
     const cards = [
-      ['Avg TAT', fmt(s.avgTAT)], ['Avg WT', fmt(s.avgWT)], ['Avg RT', fmt(s.avgRT)],
-      ['Throughput', fmt(s.throughput) + ' /unit'], ['Context switches', s.switches],
-      ['Overhead', fmt(s.overhead)], ['Efficiency', fmt(s.efficiency) + '%'], ['Last CT', s.lastCT]
-    ].map(c => '<div class="sum-card"><b>' + c[1] + '</b><span>' + c[0] + '</span></div>').join('');
+      [f(res.summary.avgTAT), 'Avg TAT'], [f(res.summary.avgWT), 'Avg WT'], [f(res.summary.avgRT), 'Avg RT'],
+      [f(res.summary.throughput) + ' /unit', 'Throughput'], [res.summary.switches, 'Context switches'],
+      [f(res.summary.overhead), 'Overhead'], [f(res.summary.efficiency) + '%', 'Efficiency'], [res.summary.lastCT, 'Last CT']
+    ].map(c => '<div class="sum-card"><b>' + c[0] + '</b><span>' + c[1] + '</span></div>').join('');
+
+    const steps = '<ol class="steps">' + res.log.map(l => '<li>' + esc(l) + '</li>').join('') + '</ol>';
 
     container.innerHTML =
-      '<div class="card results-card">' +
-      '<div class="q-head"><h3>Solution \u2014 ' + meta.label + '</h3>' +
-      '<button class="btn ghost" type="button" onclick="window.print()">Print / Export</button></div>' +
-      (meta.note ? '<p class="hint">' + meta.note + '</p>' : '') +
-      '<h4>Gantt chart</h4>' + ganttHTML(res.timeline) +
-      '<h4>Results table</h4>' + table +
-      '<h4>Summary</h4><div class="summary-grid">' + cards + '</div>' +
-      '<h4>Step-by-step explanation</h4><ol class="steps">' +
-      res.log.map(l => '<li>' + l + '</li>').join('') + '</ol>' +
+      '<div class="card">' +
+      '<div class="q-head"><h3>Solution \u2014 ' + esc(meta.label) + '</h3>' +
+      '<div class="btn-row" style="margin:0"><button class="btn ghost btn-print">Print / Export</button></div></div>' +
+      '<h4 style="' + SEC + '">Gantt chart</h4>' + gantt +
+      '<h4 style="' + SEC + '">Results table</h4><div class="table-wrap"><table>' + head + body + '</table></div>' +
+      '<h4 style="' + SEC + '">Summary</h4><div class="summary-grid">' + cards + '</div>' +
+      '<h4 style="' + SEC + '">Step-by-step explanation</h4>' + steps +
       '</div>';
-    container.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    container.querySelector('.btn-print').addEventListener('click', () => window.print());
   }
 
-  /* ---------- Solver: calculate ---------- */
-  function onCalculate() {
-    const { procs, errors } = collectProcesses();
-    const errBox = $('solver-error');
-    if (errors.length) {
-      errBox.innerHTML = errors.join('<br>');
-      errBox.hidden = false;
-      $('solver-results').innerHTML = '';
-      return;
-    }
-    errBox.hidden = true;
-    const algo = currentAlgo();
-    const opts = {
-      qt: +$('qt').value,
-      rule: $('rule').value,
-      aging: +$('aging').value || 0,
-      levels: collectMLQLevels()
-    };
-    let note = '';
-    if (algo === 'rr') note = 'Quantum Time QT = ' + opts.qt + '.';
-    if (algo === 'priority-np' || algo === 'priority-p') {
-      note = (opts.rule === 'high' ? 'Highest' : 'Lowest') + ' priority number wins.' +
-        (algo === 'priority-p' && opts.aging > 0 ? ' Aging: priority improves every ' + opts.aging + ' waiting units.' : '');
-    }
-    if (algo === 'mlq') note = 'Queue 1 is the highest priority queue. ' + opts.levels.map((l, i) => 'Queue ' + (i + 1) + ' = ' + l.algo.toUpperCase() + (l.algo === 'rr' ? ' (QT=' + l.qt + ')' : '')).join(' \u00b7 ');
-    try {
-      const res = Engine.run(algo, procs, opts);
-      renderResults($('solver-results'), res, { label: ALGO_LABEL[algo], note, algo });
-    } catch (e) {
-      errBox.textContent = 'Error: ' + e.message;
-      errBox.hidden = false;
-    }
-  }
-
+  /* ---------- solver actions ---------- */
   $('btn-add').addEventListener('click', () => addRow());
+  $('btn-reset').addEventListener('click', () => {
+    pbody.innerHTML = ''; addRow(); addRow(); addRow();
+    $('solver-results').innerHTML = ''; $('solver-error').hidden = true;
+  });
   $('btn-sample').addEventListener('click', loadSample);
-  $('btn-reset').addEventListener('click', resetTable);
-  $('btn-calc').addEventListener('click', onCalculate);
+  function loadSample() {
+    pbody.innerHTML = '';
+    addRow({ pid: 'P1', at: 0, bt: '5', priority: 2, io: 0 });
+    addRow({ pid: 'P2', at: 1, bt: '3', priority: 1, io: 0 });
+    addRow({ pid: 'P3', at: 2, bt: '8', priority: 3, io: 0 });
+    addRow({ pid: 'P4', at: 3, bt: '6', priority: 2, io: 0 });
+    $('qt').value = 2;
+  }
+  $('btn-calc').addEventListener('click', () => {
+    const err = $('solver-error');
+    err.hidden = true;
+    try {
+      const procs = collectProcesses();
+      const opts = collectOpts();
+      const res = Engine.run(algoSel.value, procs, opts);
+      renderResults($('solver-results'), res, { label: labelOf(algoSel.value, opts), showPriority: isPriority(algoSel.value) });
+    } catch (e) {
+      err.textContent = e.message; err.hidden = false;
+      $('solver-results').innerHTML = '';
+    }
+  });
 
-  /* ---------- Practice generator ---------- */
-  let currentQ = null, solutionShown = false;
+  /* ---------- practice generator ---------- */
+  const gAlgo = $('g-algo');
+  function updatePracticeQtVisibility() {
+    const a = gAlgo.value;
+    const showQT = a === 'rr' || a === 'mlfq' || a === 'mixed'; // QT only when it can be needed
+    setVis($('g-qtmode-wrap'), showQT);
+    setVis($('g-qt-wrap'), showQT && $('g-qtmode').value === 'fixed');
+  }
+  gAlgo.addEventListener('change', updatePracticeQtVisibility);
+  $('g-qtmode').addEventListener('change', updatePracticeQtVisibility);
 
-  $('g-qtmode').addEventListener('change', () => { $('g-qt-wrap').hidden = $('g-qtmode').value !== 'fixed'; });
-
-  function collectSettings() {
-    const btMin = Math.max(1, +$('g-btmin').value || 1);
-    const btMax = Math.max(btMin, +$('g-btmax').value || btMin);
-    return {
-      algo: $('g-algo').value,
-      n: Math.min(8, Math.max(3, +$('g-n').value || 4)),
-      atMax: Math.max(0, +$('g-atmax').value || 0),
-      btMin, btMax,
-      includeIO: $('g-io').value === 'yes',
-      rule: $('g-rule').value,
-      qtMode: $('g-qtmode').value,
-      qt: Math.max(1, +$('g-qt').value || 2),
+  let currentQ = null, revealed = false;
+  function renderQuestionTable(q) {
+    const isPr = q.algo.indexOf('priority') === 0;
+    let html = '<tr><th>PID</th><th>AT</th><th>' + (q.multi ? 'Bursts (CPU / I-O)' : 'BT') + '</th>' +
+      (isPr ? '<th>Priority</th>' : '') + (q.usedIO ? '<th>I/O</th>' : '') + '</tr>';
+    html += q.procs.map(p =>
+      '<tr><td><strong>' + esc(p.pid) + '</strong></td><td>' + p.at + '</td><td>' + esc(p.bursts ? p.bursts : p.bt) + '</td>' +
+      (isPr ? '<td>' + p.priority + '</td>' : '') + (q.usedIO ? '<td>' + p.io + '</td>' : '') + '</tr>').join('');
+    $('q-table').innerHTML = html;
+  }
+  function generate() {
+    const settings = {
+      algo: gAlgo.value, n: +$('g-n').value || 4, atMax: +$('g-atmax').value || 8,
+      btMin: Math.max(1, +$('g-btmin').value || 1), btMax: Math.max(1, +$('g-btmax').value || 9),
+      includeIO: $('g-io').value === 'yes', multi: $('g-multi').value === 'yes',
+      rule: $('g-rule').value, qtMode: $('g-qtmode').value, qt: +$('g-qt').value || 2,
       diff: $('g-diff').value
     };
-  }
-
-  function questionTableHTML(q) {
-    let html = '<thead><tr><th>PID</th><th>AT</th><th>BT</th>' +
-      (q.usePriority ? '<th>Priority</th>' : '') +
-      (q.includeIO ? '<th>I/O</th>' : '') +
-      (q.algo === 'mlq' ? '<th>Queue</th>' : '') + '</tr></thead><tbody>';
-    q.procs.forEach(p => {
-      html += '<tr><td><b>' + p.pid + '</b></td><td>' + p.at + '</td><td>' + p.bt + '</td>' +
-        (q.usePriority ? '<td>' + p.priority + '</td>' : '') +
-        (q.includeIO ? '<td>' + p.io + '</td>' : '') +
-        (q.algo === 'mlq' ? '<td>' + p.queue + '</td>' : '') + '</tr>';
-    });
-    return html + '</tbody>';
-  }
-
-  function generate() {
-    currentQ = Generator.generateQuestion(collectSettings());
-    solutionShown = false;
-    $('question-card').hidden = false;
-    $('q-algo-pill').textContent = ALGO_LABEL[currentQ.algo];
+    if (settings.btMax < settings.btMin) settings.btMax = settings.btMin;
+    currentQ = Generator.generateQuestion(settings);
+    revealed = false;
+    $('q-algo-pill').textContent = currentQ.tag;
     $('q-statement').textContent = currentQ.statement;
-    $('q-table').innerHTML = questionTableHTML(currentQ);
+    renderQuestionTable(currentQ);
+    $('question-card').hidden = false;
     $('btn-reveal').textContent = 'Reveal solution';
     $('practice-results').innerHTML = '';
-    $('question-card').scrollIntoView({ behavior: 'smooth', block: 'start' });
   }
-
-  function reveal() {
-    if (!currentQ) return;
-    if (solutionShown) {
-      $('practice-results').innerHTML = '';
-      $('btn-reveal').textContent = 'Reveal solution';
-      solutionShown = false;
-      return;
-    }
-    const opts = {
-      qt: currentQ.qt,
-      rule: currentQ.rule,
-      aging: 0,
-      levels: currentQ.mlq ? currentQ.mlq.levels : null
-    };
-    let note = '';
-    if (currentQ.algo === 'rr') note = 'Quantum Time QT = ' + currentQ.qt + '.';
-    if (currentQ.usePriority) note = (currentQ.rule === 'high' ? 'Highest' : 'Lowest') + ' priority number wins.';
-    if (currentQ.algo === 'mlq') note = 'Queue 1 = RR (QT=' + currentQ.mlq.levels[0].qt + '), Queue 2 = FCFS. Queue 1 preempts Queue 2.';
-    const res = Engine.run(currentQ.algo, currentQ.procs, opts);
-    renderResults($('practice-results'), res, { label: currentQ.algoName, note, algo: currentQ.algo });
-    $('btn-reveal').textContent = 'Hide solution';
-    solutionShown = true;
-  }
-
   $('btn-generate').addEventListener('click', generate);
   $('btn-newq').addEventListener('click', generate);
-  $('btn-reveal').addEventListener('click', reveal);
+  $('btn-reveal').addEventListener('click', () => {
+    if (!currentQ) return;
+    revealed = !revealed;
+    if (revealed) {
+      const res = Engine.run(currentQ.algo, currentQ.procs, { qt: currentQ.qt, rule: currentQ.rule, levels: currentQ.levels });
+      const label = currentQ.algo === 'mlfq'
+        ? 'MLFQ (' + currentQ.levels.map((l, i) => 'Q' + (i + 1) + ' QT=' + l.qt).join(', ') + ')'
+        : currentQ.algoLabel + (currentQ.qt ? ' (QT = ' + currentQ.qt + ')' : '');
+      renderResults($('practice-results'), res, { label, showPriority: currentQ.algo.indexOf('priority') === 0 });
+      $('btn-reveal').textContent = 'Hide solution';
+    } else {
+      $('practice-results').innerHTML = '';
+      $('btn-reveal').textContent = 'Reveal solution';
+    }
+  });
 
-  /* ---------- Init ---------- */
-  updateOptions();
-  loadSample();
+  /* ---------- boot ---------- */
+  addRow(); addRow(); addRow();
+  updateQuantumVisibility();
+  updatePracticeQtVisibility();
+  buildMlfqRows();
 
-  // Demo hook for quick preview: opens solver with sample data already calculated
-  if (location.hash === '#demo') {
-    switchView('solver');
-    onCalculate();
-  } else if (location.hash === '#demo-practice') {
-    switchView('practice');
-    generate();
-    reveal();
+  // QA / demo deep links
+  if (location.hash === '#demo') { show('solver'); loadSample(); $('btn-calc').click(); }
+  else if (location.hash === '#demo-mlfq') {
+    show('solver'); algoSel.value = 'mlfq'; updateQuantumVisibility();
+    pbody.innerHTML = '';
+    addRow({ pid: 'P1', at: 0, bt: '10', io: 0 });
+    addRow({ pid: 'P2', at: 0, bt: '4', io: 0 });
+    addRow({ pid: 'P3', at: 1, bt: '2, I5, 3', io: 0 });
+    $('btn-calc').click();
   }
+  else if (location.hash === '#demo-practice') { show('practice'); $('btn-generate').click(); $('btn-reveal').click(); }
 })();
+
+/* ---------- node exports for testing ---------- */
+if (typeof module !== 'undefined') module.exports = { Engine, Generator };
