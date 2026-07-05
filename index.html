@@ -1,0 +1,262 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OS-1 Process Scheduling Solver</title>
+<meta name="description" content="Solve and practice OS-1 CPU scheduling questions: FCFS, SJF, SRTF, Round Robin, Priority and Multi-Level Queue with Gantt charts and full calculations.">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand"><span class="logo">OS</span> OS-1 Process Scheduling Solver</div>
+  <nav id="nav" aria-label="Main navigation">
+    <button class="nav-btn active" data-view="home">Home</button>
+    <button class="nav-btn" data-view="solver">Manual Solver</button>
+    <button class="nav-btn" data-view="practice">Practice Generator</button>
+    <button class="nav-btn" data-view="formulas">Formulas</button>
+  </nav>
+</header>
+
+<main>
+
+<!-- ================= HOME ================= -->
+<section id="view-home" class="view">
+  <div class="hero">
+    <h1>CPU scheduling, <span class="accent">step by step</span></h1>
+    <p>Solve your own OS-1 scheduling questions or generate unlimited exam-style practice questions — with Gantt charts, CT / TAT / WT / RT tables and full explanations.</p>
+  </div>
+
+  <div class="mode-cards">
+    <button class="mode-card" data-goto="solver">
+      <div class="mode-icon">🧮</div>
+      <h2>Solve My Own Question</h2>
+      <p>Enter your processes (AT, BT, priority, I/O, quantum), choose the algorithm, and get the full solution instantly with a step-by-step explanation.</p>
+      <span class="mode-cta">Open Manual Solver →</span>
+    </button>
+    <button class="mode-card" data-goto="practice">
+      <div class="mode-icon">🎲</div>
+      <h2>Generate a Revision Question</h2>
+      <p>Pick the algorithm, number of processes and difficulty. The website builds an exam-style question — try it yourself, then reveal the solution.</p>
+      <span class="mode-cta">Open Practice Generator →</span>
+    </button>
+  </div>
+
+  <div class="card algo-strip">
+    <h3>Supported algorithms</h3>
+    <div class="chips">
+      <span class="chip">FCFS</span><span class="chip">SJF</span><span class="chip">SRTF</span>
+      <span class="chip">Round Robin</span><span class="chip">Priority (Non-Preemptive)</span>
+      <span class="chip">Priority (Preemptive)</span><span class="chip">Multi-Level Queue</span>
+    </div>
+  </div>
+</section>
+
+<!-- ================= MANUAL SOLVER ================= -->
+<section id="view-solver" class="view" hidden>
+  <h1 class="view-title">Manual Solver</h1>
+
+  <div class="card">
+    <h3>1 · Algorithm &amp; options</h3>
+    <div class="options-grid">
+      <label>Algorithm
+        <select id="algo">
+          <option value="fcfs">FCFS — First Come First Serve (non-preemptive)</option>
+          <option value="sjf">SJF — Shortest Job First (non-preemptive)</option>
+          <option value="srtf">SRTF — Shortest Remaining Time First (preemptive)</option>
+          <option value="rr">RR — Round Robin (preemptive)</option>
+          <option value="priority-np">Priority — Non-Preemptive</option>
+          <option value="priority-p">Priority — Preemptive</option>
+          <option value="mlq">Multi-Level Queue</option>
+        </select>
+      </label>
+      <label id="opt-qt" hidden>Quantum Time (QT)
+        <input type="number" id="qt" min="1" value="2">
+      </label>
+      <label id="opt-rule" hidden>Priority rule
+        <select id="rule">
+          <option value="low">Lowest number = higher priority</option>
+          <option value="high">Highest number = higher priority</option>
+        </select>
+      </label>
+      <label id="opt-aging" hidden>Aging: improve priority every N waiting units (0 = off)
+        <input type="number" id="aging" min="0" value="0">
+      </label>
+    </div>
+
+    <div id="mlq-config" hidden>
+      <div class="options-grid" style="margin-top:14px">
+        <label>Number of queue levels
+          <input type="number" id="mlq-levels" min="2" max="4" value="2">
+        </label>
+      </div>
+      <div id="mlq-rows"></div>
+      <p class="hint">Queue 1 has the highest priority: an arrived process in a higher queue preempts lower queues. FCFS / SJF run non-preemptively inside their queue; SRTF and Priority re-evaluate every time unit; RR uses its own quantum. Assign each process a queue number in the table below.</p>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>2 · Processes</h3>
+    <div class="table-wrap">
+      <table id="ptable">
+        <thead>
+          <tr>
+            <th>PID</th><th>Arrival (AT)</th><th>Burst (BT)</th>
+            <th class="col-priority hide">Priority</th><th>I/O Time</th>
+            <th class="col-queue hide">Queue</th><th></th>
+          </tr>
+        </thead>
+        <tbody id="pbody"></tbody>
+      </table>
+    </div>
+    <div class="btn-row">
+      <button class="btn ghost" id="btn-add">+ Add process</button>
+      <button class="btn ghost" id="btn-sample">Load sample data</button>
+      <button class="btn ghost danger" id="btn-reset">Reset</button>
+      <button class="btn primary" id="btn-calc">Calculate schedule</button>
+    </div>
+    <div id="solver-error" class="error" hidden></div>
+  </div>
+
+  <div id="solver-results"></div>
+</section>
+
+<!-- ================= PRACTICE GENERATOR ================= -->
+<section id="view-practice" class="view" hidden>
+  <h1 class="view-title">Practice Generator</h1>
+
+  <div class="card">
+    <h3>Question settings</h3>
+    <div class="options-grid">
+      <label>Algorithm
+        <select id="g-algo">
+          <option value="mixed">Mixed — website chooses</option>
+          <option value="fcfs">FCFS</option>
+          <option value="sjf">SJF</option>
+          <option value="srtf">SRTF</option>
+          <option value="rr">Round Robin</option>
+          <option value="priority-np">Priority (Non-Preemptive)</option>
+          <option value="priority-p">Priority (Preemptive)</option>
+          <option value="mlq">Multi-Level Queue</option>
+        </select>
+      </label>
+      <label>Number of processes
+        <input type="number" id="g-n" min="3" max="8" value="4">
+      </label>
+      <label>Max arrival time
+        <input type="number" id="g-atmax" min="0" value="8">
+      </label>
+      <label>Burst time range
+        <div class="range-pair">
+          <input type="number" id="g-btmin" min="1" value="1"> –
+          <input type="number" id="g-btmax" min="1" value="9">
+        </div>
+      </label>
+      <label>Include I/O time?
+        <select id="g-io"><option value="no">No</option><option value="yes">Yes</option></select>
+      </label>
+      <label>Priority rule (for priority questions)
+        <select id="g-rule">
+          <option value="random">Website chooses randomly</option>
+          <option value="low">Lowest number = higher priority</option>
+          <option value="high">Highest number = higher priority</option>
+        </select>
+      </label>
+      <label>Quantum time (for RR questions)
+        <select id="g-qtmode">
+          <option value="random">Website chooses randomly</option>
+          <option value="fixed">I choose the quantum</option>
+        </select>
+      </label>
+      <label id="g-qt-wrap" hidden>Quantum value
+        <input type="number" id="g-qt" min="1" value="2">
+      </label>
+      <label>Difficulty
+        <select id="g-diff">
+          <option value="easy">Easy</option>
+          <option value="medium" selected>Medium</option>
+          <option value="hard">Hard</option>
+          <option value="tricky">Tricky exam style</option>
+        </select>
+      </label>
+    </div>
+    <div class="btn-row">
+      <button class="btn primary" id="btn-generate">Generate question</button>
+    </div>
+  </div>
+
+  <div class="card" id="question-card" hidden>
+    <div class="q-head">
+      <h3>Generated question</h3>
+      <span class="pill" id="q-algo-pill"></span>
+    </div>
+    <p id="q-statement" class="q-statement"></p>
+    <div class="table-wrap"><table id="q-table"></table></div>
+    <div class="btn-row">
+      <button class="btn primary" id="btn-reveal">Reveal solution</button>
+      <button class="btn ghost" id="btn-newq">Generate another question</button>
+    </div>
+  </div>
+
+  <div id="practice-results"></div>
+</section>
+
+<!-- ================= FORMULAS ================= -->
+<section id="view-formulas" class="view" hidden>
+  <h1 class="view-title">Formula Reference</h1>
+
+  <div class="card">
+    <h3>Per-process formulas</h3>
+    <div class="table-wrap">
+      <table class="formula-table">
+        <tbody>
+          <tr><td>CT</td><td>Completion Time — when the process finishes its full burst</td><td><code>read from Gantt chart</code></td></tr>
+          <tr><td>TAT</td><td>Turnaround Time</td><td><code>TAT = CT − AT</code></td></tr>
+          <tr><td>WT</td><td>Waiting Time</td><td><code>WT = TAT − (BT + I/O Time)</code></td></tr>
+          <tr><td>RT</td><td>Response Time (first CPU allocation)</td><td><code>RT = First Start − AT</code></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>Overall formulas</h3>
+    <div class="table-wrap">
+      <table class="formula-table">
+        <tbody>
+          <tr><td>Throughput</td><td>Completed work per time</td><td><code>Number of processes ÷ Last CT</code></td></tr>
+          <tr><td>Overhead</td><td>Context switching rate</td><td><code>Number of switches ÷ Last CT</code></td></tr>
+          <tr><td>Efficiency</td><td>Useful CPU percentage</td><td><code>(1 − Overhead) × 100</code></td></tr>
+          <tr><td>Averages</td><td>Avg TAT / WT / RT</td><td><code>Sum ÷ Number of processes</code></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="hint">A context switch is counted whenever the CPU changes directly from one process to a different process. Idle → process is not counted as a process-to-process switch.</p>
+  </div>
+
+  <div class="card">
+    <h3>Algorithm cheat sheet</h3>
+    <div class="table-wrap">
+      <table class="formula-table">
+        <tbody>
+          <tr><td>FCFS</td><td>Earliest arrival first — non-preemptive</td><td><code>criteria: AT</code></td></tr>
+          <tr><td>SJF</td><td>Shortest burst among arrived — non-preemptive</td><td><code>criteria: BT</code></td></tr>
+          <tr><td>SRTF</td><td>Shortest remaining time — preemptive SJF</td><td><code>criteria: remaining BT</code></td></tr>
+          <tr><td>RR</td><td>Ready queue with time slices — preemptive</td><td><code>criteria: AT + QT</code></td></tr>
+          <tr><td>Priority</td><td>Best priority wins (highest or lowest rule)</td><td><code>NP and P versions</code></td></tr>
+          <tr><td>MLQ</td><td>Multiple queues, each with its own algorithm</td><td><code>queue 1 = top priority</code></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="hint">Default tie-breaking: earlier Arrival Time first, then smaller PID order.</p>
+  </div>
+</section>
+
+</main>
+
+<footer>Made by Abdulhamid AlGhali - OS1-Scheduling Process Solver</footer>
+
+<script src="script.js"></script>
+</body>
+</html>

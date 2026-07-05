@@ -1,0 +1,147 @@
+:root{
+  --text:#2C2C2B; --text2:#7D7A75; --canvas:#FFFFFF; --soft:#F9F8F7; --soft2:#F0EFED;
+  --border:#E6E5E3; --blue:#2783DE; --blue-soft:#E5F2FC; --green:#46A171; --green-soft:#E8F1EC;
+  --orange:#D5803B; --orange-soft:#FBEBDE; --red:#E56458; --red-soft:#FCE9E7;
+}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0}
+body{
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  color:var(--text); background:var(--canvas); font-size:16px; line-height:1.5;
+}
+
+/* ---------- Top bar ---------- */
+.topbar{
+  display:flex; align-items:center; justify-content:space-between; gap:16px; flex-wrap:wrap;
+  padding:14px 24px; border-bottom:1px solid var(--border);
+  position:sticky; top:0; background:rgba(255,255,255,.94); backdrop-filter:blur(6px); z-index:20;
+}
+.brand{display:flex; align-items:center; gap:10px; font-weight:800; font-size:17px; letter-spacing:-.01em}
+.logo{background:var(--blue); color:#fff; border-radius:8px; padding:3px 8px; font-size:13px; font-weight:800}
+nav{display:flex; gap:6px; flex-wrap:wrap}
+.nav-btn{
+  border:1px solid transparent; background:transparent; color:var(--text2);
+  font:inherit; font-size:14px; font-weight:600; padding:7px 13px; border-radius:8px; cursor:pointer;
+}
+.nav-btn:hover{background:var(--soft)}
+.nav-btn.active{background:var(--blue-soft); color:var(--blue)}
+.nav-btn:focus-visible{outline:2px solid var(--blue); outline-offset:2px}
+
+main{max-width:1080px; margin:0 auto; padding:32px 24px 64px}
+.view-title{font-size:28px; letter-spacing:-.02em; margin:0 0 20px}
+
+/* ---------- Home ---------- */
+.hero{padding:36px 0 8px; max-width:720px}
+.hero h1{font-size:40px; line-height:1.1; letter-spacing:-.03em; margin:0 0 14px}
+.hero .accent{color:var(--blue)}
+.hero p{color:var(--text2); font-size:18px; margin:0 0 8px}
+.mode-cards{display:grid; grid-template-columns:1fr 1fr; gap:16px; margin:28px 0}
+.mode-card{
+  text-align:left; font:inherit; color:inherit; cursor:pointer;
+  background:var(--soft); border:1px solid var(--border); border-radius:12px; padding:24px;
+  transition:border-color .15s, transform .15s;
+}
+.mode-card:hover{border-color:var(--blue); transform:translateY(-2px)}
+.mode-card:focus-visible{outline:2px solid var(--blue); outline-offset:2px}
+.mode-icon{font-size:28px; margin-bottom:10px}
+.mode-card h2{margin:0 0 8px; font-size:20px; letter-spacing:-.01em}
+.mode-card p{margin:0 0 14px; color:var(--text2); font-size:15px}
+.mode-cta{color:var(--blue); font-weight:700; font-size:14px}
+.algo-strip h3{margin-top:0}
+.chips{display:flex; flex-wrap:wrap; gap:8px}
+.chip{background:var(--blue-soft); color:var(--blue); font-size:13px; font-weight:700; padding:5px 11px; border-radius:999px}
+
+/* ---------- Cards / layout ---------- */
+.card{background:#fff; border:1px solid var(--border); border-radius:12px; padding:20px 22px; margin:0 0 16px}
+.card h3{margin:0 0 14px; font-size:16px}
+.card h4{margin:22px 0 10px; font-size:14px; text-transform:uppercase; letter-spacing:.06em; color:var(--text2)}
+.hint{color:var(--text2); font-size:13.5px; margin:10px 0 0}
+.options-grid{display:grid; grid-template-columns:repeat(auto-fit,minmax(230px,1fr)); gap:12px 16px}
+label{display:flex; flex-direction:column; gap:5px; font-size:13px; font-weight:600; color:var(--text2)}
+input,select{
+  font:inherit; font-size:14.5px; color:var(--text); background:#fff;
+  border:1px solid var(--border); border-radius:8px; padding:8px 10px; min-height:40px;
+}
+input:focus,select:focus{outline:2px solid var(--blue); outline-offset:1px; border-color:var(--blue)}
+.range-pair{display:flex; align-items:center; gap:8px}
+.range-pair input{width:100%}
+
+/* ---------- Buttons ---------- */
+.btn-row{display:flex; gap:10px; flex-wrap:wrap; margin-top:16px}
+.btn{
+  font:inherit; font-size:14.5px; font-weight:700; border-radius:8px; cursor:pointer;
+  padding:10px 16px; border:1px solid var(--border); background:#fff; color:var(--text); min-height:44px;
+}
+.btn:hover{background:var(--soft)}
+.btn:focus-visible{outline:2px solid var(--blue); outline-offset:2px}
+.btn.primary{background:var(--blue); border-color:var(--blue); color:#fff}
+.btn.primary:hover{background:#1f6fc0}
+.btn.ghost{background:#fff}
+.btn.danger{color:var(--red)}
+.btn.small{padding:5px 10px; min-height:32px; font-size:13px}
+
+/* ---------- Tables ---------- */
+.table-wrap{overflow-x:auto; border:1px solid var(--border); border-radius:10px}
+table{border-collapse:collapse; width:100%; font-size:14px}
+th{background:var(--soft); text-align:left; font-size:12.5px; text-transform:uppercase; letter-spacing:.04em; color:var(--text2)}
+th,td{padding:9px 12px; border-bottom:1px solid var(--border); white-space:nowrap}
+tbody tr:last-child td{border-bottom:none}
+td input{min-height:34px; padding:5px 8px; width:86px}
+td input.pid-in{width:74px}
+.col-priority.hide,.col-queue.hide{display:none}
+.error{margin-top:14px; background:var(--red-soft); border:1px solid #f3ccc8; color:#9d3c34; border-radius:9px; padding:10px 13px; font-size:14px; font-weight:600}
+
+/* ---------- MLQ config ---------- */
+#mlq-rows{display:flex; flex-direction:column; gap:10px; margin-top:12px}
+.mlq-row{display:flex; gap:12px; align-items:end; flex-wrap:wrap; background:var(--soft); border:1px solid var(--border); border-radius:10px; padding:12px 14px}
+.mlq-row .lvl{font-weight:800; color:var(--blue); min-width:74px; padding-bottom:10px}
+
+/* ---------- Question card ---------- */
+.q-head{display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap}
+.q-head h3{margin:0}
+.pill{background:var(--blue-soft); color:var(--blue); font-weight:800; font-size:12.5px; padding:5px 11px; border-radius:999px}
+.q-statement{background:var(--soft); border-left:4px solid var(--blue); border-radius:0 10px 10px 0; padding:13px 15px; font-size:15px; margin:14px 0}
+
+/* ---------- Gantt ---------- */
+.gantt{padding:6px 2px 26px}
+.gantt-track{display:flex; border-radius:8px; min-height:52px}
+.g-block{
+  position:relative; display:flex; align-items:center; justify-content:center;
+  min-width:34px; border:1px solid rgba(0,0,0,.14); border-left-width:0; color:#fff; font-weight:800; font-size:13.5px;
+}
+.g-block:first-child{border-left-width:1px; border-radius:8px 0 0 8px}
+.g-block:last-child{border-radius:0 8px 8px 0}
+.g-block.idle{background:var(--soft2)!important; color:var(--text2); font-weight:600; font-style:italic}
+.g-t{position:absolute; bottom:-22px; left:-1px; color:var(--text2); font-size:12px; font-weight:600; font-style:normal}
+.g-tend{position:absolute; bottom:-22px; right:-1px; color:var(--text2); font-size:12px; font-weight:600; font-style:normal}
+
+/* ---------- Summary ---------- */
+.summary-grid{display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:10px}
+.sum-card{background:var(--soft); border:1px solid var(--border); border-radius:10px; padding:12px 14px}
+.sum-card b{display:block; font-size:19px; color:var(--blue); letter-spacing:-.01em}
+.sum-card span{font-size:12px; color:var(--text2); font-weight:600}
+
+/* ---------- Steps ---------- */
+.steps{margin:0; padding-left:22px; display:flex; flex-direction:column; gap:6px; font-size:14.5px}
+.steps li::marker{color:var(--blue); font-weight:700}
+
+/* ---------- Formulas ---------- */
+.formula-table td:first-child{font-weight:700}
+.formula-table code{background:var(--soft2); border-radius:6px; padding:2px 7px; font-family:Menlo,Consolas,monospace; font-size:13px}
+
+footer{border-top:1px solid var(--border); color:var(--text2); font-size:13px; text-align:center; padding:20px 24px 30px}
+
+/* ---------- Responsive ---------- */
+@media (max-width:760px){
+  main{padding:20px 16px 48px}
+  .hero h1{font-size:30px}
+  .mode-cards{grid-template-columns:1fr}
+  .topbar{padding:12px 16px}
+}
+
+/* ---------- Print ---------- */
+@media print{
+  .topbar,footer,.btn-row,.btn,nav{display:none!important}
+  .card{border:none; padding:8px 0}
+  body{font-size:12px}
+}
