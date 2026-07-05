@@ -98,10 +98,24 @@
 
   <div class="card">
     <h3>2 · Processes</h3>
+    <div class="options-grid" style="margin-bottom:6px">
+      <label>Burst input mode
+        <select id="burst-mode">
+          <option value="simple">Simple — one BT (+ optional I/O)</option>
+          <option value="multi">Multiple CPU &amp; I/O bursts</option>
+        </select>
+      </label>
+      <label id="opt-nbt" style="display:none" hidden>Number of CPU bursts (BT)
+        <input type="number" id="n-bt" min="1" max="5" value="3">
+      </label>
+      <label id="opt-nio" style="display:none" hidden>Number of I/O bursts
+        <input type="number" id="n-io" min="0" max="4" value="2">
+      </label>
+    </div>
     <div class="table-wrap">
       <table id="ptable">
         <thead>
-          <tr>
+          <tr id="phead">
             <th>PID</th><th>Arrival (AT)</th><th>Burst(s)</th>
             <th class="col-priority hide">Priority</th><th>I/O Time</th>
             <th></th>
@@ -110,7 +124,7 @@
         <tbody id="pbody"></tbody>
       </table>
     </div>
-    <p class="hint">Burst(s): a single number (e.g. <code>5</code>) is one CPU burst — you can optionally add one I/O value in the I/O column. For multiple CPU/I/O bursts, type a sequence like <code>5, I3, 4, I2, 6</code> (I = I/O). Sequences must start and end with a CPU burst; the I/O column is ignored when a sequence is used.</p>
+    <p class="hint">Burst(s): a single number (e.g. <code>5</code>) is one CPU burst — you can optionally add one I/O value in the I/O column. For multiple CPU/I/O bursts, type a sequence like <code>5, I3, 4, I2, 6</code> (I = I/O). Sequences must start and end with a CPU burst; the I/O column is ignored when a sequence is used. Prefer separate boxes? Set <strong>Burst input mode</strong> above to <strong>Multiple CPU &amp; I/O bursts</strong> and choose how many BT and I/O columns you need — the table rebuilds automatically (BT1, IO1, BT2, IO2, BT3…).</p>
     <div class="btn-row">
       <button class="btn ghost" id="btn-add">+ Add process</button>
       <button class="btn ghost" id="btn-sample">Load sample data</button>

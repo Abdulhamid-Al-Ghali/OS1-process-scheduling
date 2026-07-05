@@ -533,42 +533,158 @@ if (typeof document !== 'undefined') (function UI() {
 
   /* ---------- solver: process rows ---------- */
   const pbody = $('pbody');
+  const phead = $('phead');
+  const burstMode = () => $('burst-mode').value;
+  const nBT = () => Math.min(5, Math.max(1, Math.floor(+$('n-bt').value) || 1));
+  const nIO = () => Math.min(nBT() - 1, Math.max(0, Math.floor(+$('n-io').value) || 0));
+
+  // Rebuild the table header to match the current burst input mode
+  function renderHead() {
+    if (burstMode() === 'multi') {
+      let h = '<th>PID</th><th>Arrival (AT)</th>';
+      for (let i = 1; i <= nBT(); i++) {
+        h += '<th>BT' + i + '</th>';
+        if (i <= nIO()) h += '<th>IO' + i + '</th>';
+      }
+      h += '<th class="col-priority">Priority</th><th></th>';
+      phead.innerHTML = h;
+    } else {
+      phead.innerHTML = '<th>PID</th><th>Arrival (AT)</th><th>Burst(s)</th>' +
+        '<th class="col-priority">Priority</th><th>I/O Time</th><th></th>';
+    }
+    phead.querySelector('.col-priority').classList.toggle('hide', !isPriority(algoSel.value));
+  }
+
   function addRow(vals = {}) {
     const tr = document.createElement('tr');
-    tr.innerHTML =
+    let html =
       '<td><input class="f-pid" value="' + esc(vals.pid != null ? vals.pid : 'P' + (pbody.children.length + 1)) + '"></td>' +
-      '<td><input class="f-at" type="number" min="0" value="' + esc(vals.at != null ? vals.at : 0) + '"></td>' +
-      '<td><input class="f-bt" placeholder="5   or   5, I3, 4" value="' + esc(vals.bt != null ? vals.bt : '') + '"></td>' +
-      '<td class="col-priority"><input class="f-pr" type="number" value="' + esc(vals.priority != null ? vals.priority : '') + '"></td>' +
-      '<td><input class="f-io" type="number" min="0" value="' + esc(vals.io != null ? vals.io : 0) + '"></td>' +
-      '<td><button class="btn ghost danger btn-remove">Remove</button></td>';
+      '<td><input class="f-at" type="number" min="0" value="' + esc(vals.at != null ? vals.at : 0) + '"></td>';
+    if (burstMode() === 'multi') {
+      const bts = vals.bts || [];
+      const ios = vals.ios || [];
+      for (let i = 0; i < nBT(); i++) {
+        html += '<td><input class="f-bt-multi" type="number" min="1" placeholder="BT' + (i + 1) + '" value="' + esc(bts[i] != null ? bts[i] : (i === 0 && vals.bt != null ? vals.bt : '')) + '"></td>';
+        if (i < nIO()) html += '<td><input class="f-io-multi" type="number" min="0" placeholder="IO' + (i + 1) + '" value="' + esc(ios[i] != null ? ios[i] : '') + '"></td>';
+      }
+      html += '<td class="col-priority"><input class="f-pr" type="number" value="' + esc(vals.priority != null ? vals.priority : '') + '"></td>' +
+        '<td><button class="btn ghost danger btn-remove">Remove</button></td>';
+    } else {
+      html += '<td><input class="f-bt" placeholder="5   or   5, I3, 4" value="' + esc(vals.bt != null ? vals.bt : '') + '"></td>' +
+        '<td class="col-priority"><input class="f-pr" type="number" value="' + esc(vals.priority != null ? vals.priority : '') + '"></td>' +
+        '<td><input class="f-io" type="number" min="0" value="' + esc(vals.io != null ? vals.io : 0) + '"></td>' +
+        '<td><button class="btn ghost danger btn-remove">Remove</button></td>';
+    }
+    tr.innerHTML = html;
     tr.querySelector('.btn-remove').addEventListener('click', () => tr.remove());
     tr.querySelector('.col-priority').classList.toggle('hide', !isPriority(algoSel.value));
     pbody.appendChild(tr);
   }
+
+  // Capture current row values so the table can be rebuilt without losing data
+  function captureRows() {
+    return [...pbody.children].map(tr => {
+      const v = {
+        pid: tr.querySelector('.f-pid').value,
+        at: tr.querySelector('.f-at').value,
+        priority: tr.querySelector('.f-pr').value,
+      };
+      const simple = tr.querySelector('.f-bt');
+      if (simple) { // coming FROM simple mode
+        v.io = tr.querySelector('.f-io').value;
+        const text = simple.value.trim();
+        v.bt = text;
+        try { // best effort: split a sequence like "5, I3, 4" into columns
+          const seq = Engine.parseBurstSequence(text);
+          v.bts = seq.filter(b => b.type === 'cpu').map(b => b.len);
+          v.ios = seq.filter(b => b.type === 'io').map(b => b.len);
+        } catch (e) { v.bts = text === '' ? [] : [text]; v.ios = []; }
+      } else { // coming FROM multi mode
+        v.bts = [...tr.querySelectorAll('.f-bt-multi')].map(inp => inp.value);
+        v.ios = [...tr.querySelectorAll('.f-io-multi')].map(inp => inp.value);
+        // build the equivalent text sequence for simple mode
+        const parts = [];
+        for (let i = 0; i < v.bts.length; i++) {
+          if (v.bts[i] === '') break;
+          parts.push(v.bts[i]);
+          if (i < v.ios.length && v.bts[i + 1] != null && v.bts[i + 1] !== '') parts.push('I' + (v.ios[i] === '' ? 0 : v.ios[i]));
+        }
+        v.bt = parts.join(', ');
+        v.io = 0;
+      }
+      return v;
+    });
+  }
+
+  function rebuildTable() {
+    // a valid sequence ends with a CPU burst, so at most BT-1 I/O slots
+    if ($('n-bt').value === '' || +$('n-bt').value < 1) $('n-bt').value = 1;
+    if (+$('n-io').value > nBT() - 1) $('n-io').value = nBT() - 1;
+    if ($('n-io').value === '' || +$('n-io').value < 0) $('n-io').value = 0;
+    const rows = captureRows();
+    renderHead();
+    pbody.innerHTML = '';
+    if (rows.length) rows.forEach(v => addRow(v));
+    else { addRow(); addRow(); addRow(); }
+  }
+
+  function updateBurstModeVisibility() {
+    const multi = burstMode() === 'multi';
+    setVis($('opt-nbt'), multi);
+    setVis($('opt-nio'), multi);
+    rebuildTable();
+  }
+  $('burst-mode').addEventListener('change', updateBurstModeVisibility);
+  $('n-bt').addEventListener('change', rebuildTable);
+  $('n-io').addEventListener('change', rebuildTable);
 
   function collectProcesses() {
     const rows = [...pbody.children];
     if (!rows.length) throw new Error('Add at least one process.');
     const seen = new Set(), procs = [];
     const needPr = isPriority(algoSel.value);
+    const multi = burstMode() === 'multi';
     rows.forEach((tr, i) => {
       const pid = tr.querySelector('.f-pid').value.trim();
       const at = tr.querySelector('.f-at').value.trim();
-      const btText = tr.querySelector('.f-bt').value.trim();
       const pr = tr.querySelector('.f-pr').value.trim();
-      const io = tr.querySelector('.f-io').value.trim();
       if (!pid) throw new Error('Row ' + (i + 1) + ': PID is required.');
       if (seen.has(pid)) throw new Error('Duplicate PID "' + pid + '" \u2014 every process needs a unique name.');
       seen.add(pid);
       if (at === '' || isNaN(+at) || +at < 0) throw new Error(pid + ': Arrival Time must be a number \u2265 0.');
-      if (!btText) throw new Error(pid + ': Burst is required \u2014 a number like "5" or a sequence like "5, I3, 4".');
-      let seq;
-      try { seq = Engine.parseBurstSequence(btText); }
-      catch (e) { throw new Error(pid + ': ' + e.message); }
-      if (io !== '' && (isNaN(+io) || +io < 0)) throw new Error(pid + ': I/O Time must be a number \u2265 0.');
       if (needPr && (pr === '' || isNaN(+pr))) throw new Error(pid + ': Priority is required for priority scheduling.');
-      procs.push({ pid, at: +at, bursts: seq, io: io === '' ? 0 : +io, priority: pr === '' ? null : +pr });
+      let seq, io = 0;
+      if (multi) {
+        const bts = [...tr.querySelectorAll('.f-bt-multi')].map(inp => inp.value.trim());
+        const ios = [...tr.querySelectorAll('.f-io-multi')].map(inp => inp.value.trim());
+        seq = [];
+        for (let k = 0; k < bts.length; k++) {
+          if (bts[k] === '') {
+            if (k === 0) throw new Error(pid + ': BT1 is required.');
+            // this process simply has fewer bursts \u2014 but check nothing was typed after the gap
+            for (let m = k + 1; m < bts.length; m++) if (bts[m] !== '') throw new Error(pid + ': BT' + (m + 1) + ' has a value but BT' + (k + 1) + ' is empty \u2014 fill bursts from left to right.');
+            if (ios[k - 1] != null && ios[k - 1] !== '' && +ios[k - 1] > 0) throw new Error(pid + ': IO' + k + ' has a value but no CPU burst follows it \u2014 a process must end with a CPU burst.');
+            break;
+          }
+          const b = +bts[k];
+          if (isNaN(b) || b <= 0) throw new Error(pid + ': BT' + (k + 1) + ' must be a number > 0.');
+          seq.push({ type: 'cpu', len: b });
+          if (k < ios.length && bts[k + 1] != null && bts[k + 1] !== '') {
+            const v = ios[k] === '' ? 0 : +ios[k];
+            if (isNaN(v) || v < 0) throw new Error(pid + ': IO' + (k + 1) + ' must be a number \u2265 0.');
+            seq.push({ type: 'io', len: v });
+          }
+        }
+      } else {
+        const btText = tr.querySelector('.f-bt').value.trim();
+        const ioText = tr.querySelector('.f-io').value.trim();
+        if (!btText) throw new Error(pid + ': Burst is required \u2014 a number like "5" or a sequence like "5, I3, 4".');
+        try { seq = Engine.parseBurstSequence(btText); }
+        catch (e) { throw new Error(pid + ': ' + e.message); }
+        if (ioText !== '' && (isNaN(+ioText) || +ioText < 0)) throw new Error(pid + ': I/O Time must be a number \u2265 0.');
+        io = ioText === '' ? 0 : +ioText;
+      }
+      procs.push({ pid, at: +at, bursts: seq, io, priority: pr === '' ? null : +pr });
     });
     return procs;
   }
@@ -735,7 +851,7 @@ if (typeof document !== 'undefined') (function UI() {
   });
 
   /* ---------- boot ---------- */
-  addRow(); addRow(); addRow();
+  updateBurstModeVisibility(); // renders the table header + starter rows
   updateQuantumVisibility();
   updatePracticeQtVisibility();
   buildMlfqRows();
@@ -748,6 +864,16 @@ if (typeof document !== 'undefined') (function UI() {
     addRow({ pid: 'P1', at: 0, bt: '10', io: 0 });
     addRow({ pid: 'P2', at: 0, bt: '4', io: 0 });
     addRow({ pid: 'P3', at: 1, bt: '2, I5, 3', io: 0 });
+    $('btn-calc').click();
+  }
+  else if (location.hash === '#demo-multi') {
+    show('solver');
+    $('burst-mode').value = 'multi'; $('n-bt').value = 3; $('n-io').value = 2;
+    updateBurstModeVisibility();
+    pbody.innerHTML = '';
+    addRow({ pid: 'P1', at: 0, bts: [5, 4, 6], ios: [3, 2] });
+    addRow({ pid: 'P2', at: 1, bts: [3, 2], ios: [4] });
+    addRow({ pid: 'P3', at: 2, bts: [8], ios: [] });
     $('btn-calc').click();
   }
   else if (location.hash === '#demo-practice') { show('practice'); $('btn-generate').click(); $('btn-reveal').click(); }
